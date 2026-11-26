@@ -395,6 +395,20 @@ export async function fetchMe(): Promise<SyncAccountUser> {
   return j.user;
 }
 
+/** 修改当前账号密码（需已登录）：验证当前密码后更新，并吊销该账号的其他会话。 */
+export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
+  const res = await serverFetch("/auth/change-password", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ currentPassword, newPassword }),
+  });
+  if (!res.ok) {
+    const { code } = await readServerError(res);
+    const text = (code && AUTH_ERROR_TEXT[code]) || `修改密码失败（HTTP ${res.status}）`;
+    throw new SyncServerError(text, res.status, code);
+  }
+}
+
 /* ================= 邀请码（仅管理员） =================
  * 服务端只存邀请码哈希，生成时明文只返回这一次；列表只回创建时间与使用状态。
  */

@@ -59,6 +59,23 @@ if (loadTokens().length === 0 && !fs.existsSync(tokensFile())) {
 }
 
 // ---------- CLI helpers ----------
+// Emergency password reset on the server itself (owner only):
+//   AMSYNC_NEW_PASSWORD='newpass123' node sync-server.mjs --reset-password user@example.com
+// Updates the hash and revokes ALL sessions of that account.
+if (process.argv.includes('--reset-password')) {
+  const email = String(process.argv[process.argv.indexOf('--reset-password') + 1] || '').trim().toLowerCase();
+  const newPassword = process.env.AMSYNC_NEW_PASSWORD || '';
+  const users = loadUsers();
+  const user = users.find(u => u.email === email);
+  if (!user) { console.log('USER_NOT_FOUND'); process.exit(1); }
+  if (newPassword.length < 8) { console.log('PASSWORD_TOO_SHORT (min 8)'); process.exit(1); }
+  user.pw = hashPassword(newPassword);
+  writeJson(usersFile(), users);
+  writeJson(sessionsFile(), loadSessions().filter(s => s.userId !== user.id));
+  audit({ event: 'password_reset_cli', email });
+  console.log('PASSWORD_RESET_OK ' + email);
+  process.exit(0);
+}
 if (process.argv.includes('--create-invite')) {
   const code = 'AM-' + crypto.randomBytes(6).toString('hex').toUpperCase();
   const invites = loadInvites();
@@ -224,6 +241,27 @@ const server = http.createServer(async (req, res) => {
     const client = authClient(req);
     if (!client || client.type !== 'session') return json(res, 401, { error: 'unauthorized' });
     return json(res, 200, { user: { id: client.user.id, email: client.user.email, role: client.user.role || 'user' } });
+  }
+
+  if (req.method === 'POST' && url.pathname === '/auth/change-password') {
+    const client = authClient(req);
+    if (!client || client.type !== 'session') return json(res, 401, { error: 'unauthorized' });
+    const body = await readBody(req);
+    let data; try { data = JSON.parse(body); } catch { return json(res, 400, { error: 'invalid_json' }); }
+    const current = String(data.currentPassword || '');
+    const next = String(data.newPassword || '');
+    if (next.length < 8) return json(res, 400, { error: 'weak_password' });
+    const users = loadUsers();
+    const user = users.find(u => u.id === client.user.id);
+    if (!user || !verifyPassword(current, user.pw)) return json(res, 401, { error: 'invalid_credentials' });
+    user.pw = hashPassword(next);
+    writeJson(usersFile(), users);
+    // Revoke all OTHER sessions of this account; the current one stays valid.
+    const h = req.headers['authorization'] || '';
+    const currentHash = sha256(h.startsWith('Bearer ') ? h.slice(7) : '');
+    writeJson(sessionsFile(), loadSessions().filter(s => s.userId !== user.id || s.tokenHash === currentHash));
+    audit({ event: 'password_change', email: user.email });
+    return json(res, 200, { ok: true });
   }
 
   // ----- invite codes (admin only) -----

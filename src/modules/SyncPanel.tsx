@@ -3,7 +3,7 @@ import type { Account, CalEvent, Note, Project, ProjectLink, SystemEntry, Todo }
 import { call, isTauri } from "../bridge";
 import { decryptAllItems, isUnlocked } from "../crypto";
 import {
-  buildSyncPackage, checkServerHealth, checkSyncPassphrase, createInvite, fetchMe, getDevice, listInvites, listServerPackages,
+  buildSyncPackage, changePassword, checkServerHealth, checkSyncPassphrase, createInvite, fetchMe, getDevice, listInvites, listServerPackages,
   loadSyncSettings, login, logout, openSyncPackage, pullFromServer, pushToServer, register,
   saveSyncSettings, setDeviceName, setSyncPassphrase, SYNC_FILENAME, SyncServerError,
   type InviteInfo, type ServerPackageInfo, type SyncChannel, type SyncPayload, type SyncSettings,
@@ -41,6 +41,10 @@ export default function SyncPanel({ data, onMerge }: {
   const [authBusy, setAuthBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
+  const [pwCur, setPwCur] = useState("");
+  const [pwNew, setPwNew] = useState("");
+  const [pwNew2, setPwNew2] = useState("");
+  const [pwBusy, setPwBusy] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [invites, setInvites] = useState<InviteInfo[] | null>(null);
   const [newInvite, setNewInvite] = useState("");
@@ -196,6 +200,20 @@ export default function SyncPanel({ data, onMerge }: {
     } finally { setAuthBusy(false); }
   };
 
+  const doChangePassword = async () => {
+    setError(""); setMsg("");
+    if (!pwCur) { setError("请输入当前密码"); return; }
+    if (pwNew.length < 8) { setError("新密码至少 8 位"); return; }
+    if (pwNew !== pwNew2) { setError("两次输入的新密码不一致"); return; }
+    setPwBusy(true);
+    try {
+      await changePassword(pwCur, pwNew);
+      setPwCur(""); setPwNew(""); setPwNew2("");
+      setMsg("密码已修改，该账号在其他设备上的登录会话已全部失效（本机保持登录）。");
+    } catch (e) { setError(e instanceof Error ? e.message : "修改密码失败"); }
+    finally { setPwBusy(false); }
+  };
+
   const doCreateInvite = async () => {
     setError(""); setMsg(""); setInviteBusy(true);
     try {
@@ -317,6 +335,18 @@ export default function SyncPanel({ data, onMerge }: {
               服务器只保存 .amsync 密文包与版本元信息，保持零知识；同步包按<strong>登录账号隔离存储</strong>，不同账号互不可见。
               默认端点为官方服务（HTTPS）；也可改成自建端点。账号密码不落盘，只保存会话 Token 于本机浏览器存储，不进同步包。
             </p>
+            {loggedIn && (
+              <details className="span-all">
+                <summary className="dim">修改账号密码</summary>
+                <div className="form" style={{ marginTop: 6 }}>
+                  <input type="password" placeholder="当前密码" value={pwCur} onChange={(e) => setPwCur(e.target.value)} autoComplete="current-password" />
+                  <input type="password" placeholder="新密码（至少 8 位）" value={pwNew} onChange={(e) => setPwNew(e.target.value)} autoComplete="new-password" />
+                  <input type="password" placeholder="再次输入新密码" value={pwNew2} onChange={(e) => setPwNew2(e.target.value)} autoComplete="new-password" />
+                  <button disabled={pwBusy} onClick={() => void doChangePassword()}>{pwBusy ? "提交中…" : "确认修改密码"}</button>
+                </div>
+                <p className="hint">改密后该账号在其他设备上的会话会全部失效。忘记密码无法自助找回（服务器不发邮件），只能由服务器管理员重置。</p>
+              </details>
+            )}
             {loggedIn && isAdmin && (
               <div className="invite-panel span-all">
                 <div className="invite-head">
