@@ -135,7 +135,12 @@ docs/                      本文档等
 | `chunks` | doc_id, idx, text | 文档切块正文，BM25 输入 |
 | `files` | id, data(JSON), imported_at | 文件/链接归档 |
 | `vault_meta` | id=1, data(JSON) | PBKDF2 参数、salt、校验块 |
-| `vault_items` | id, data(JSON), created_at | 加密条目（value/account 为密文） |
+| `vault_items` | id, data(JSON), created_at | 加密条目（value/account 为密文；含 expiresAt/env/lastUsedAt 健康元数据） |
+| `projects` / `entity_links` | id, data(JSON) | 项目空间与实体↔项目关联（WF1，JSON 整行存） |
+| `systems` | id, data(JSON), created_at | 系统导航条目（WF1） |
+| `notes` / `todos` / `events` | id, data(JSON), created_at | 速记 / 待办 / 日程（WF2） |
+| `vault_attachments` | id, data(JSON), created_at | 保险库加密附件密文（WF3，每条目一个，≤5MB） |
+| `accounts` | id, data(JSON), created_at | 授权账号（WF5：personal-cloud / doc-source / popo 隔离） |
 | `meta` | key, value | 迁移标记 `migrated_from_localstorage=1` |
 
 启动流程：
@@ -153,7 +158,7 @@ docs/                      本文档等
 
 ### 4.3 server/data 快照
 
-应用变化后自动写 `knowledge.json`（docs + chunks + files）与 `vault-refs.json`（仅 id/key/ref/type/url，无明文）。MCP 与 CLI 读取该快照，保证与聊天检索同一份数据、同一套 BM25。
+应用变化后自动写 `knowledge.json`（docs + chunks + files + projects/links/systems/notes/todos/events/accounts 元数据）与 `vault-refs.json`（仅 id/key/ref/type/url/hasAttachment，无明文与附件内容）。MCP 与 CLI 读取该快照，保证与聊天检索同一份数据、同一套 BM25。MCP 写工具（notes/todos/events）经 `ingest-requests/` 请求文件队列由应用轮询导入落库并 ack，形成闭环。
 
 ### 4.4 临时密钥文件
 
@@ -235,7 +240,7 @@ Agent: 读取文件使用 → vault_secret_release → 删除文件
 
 ## 6. 对外接口
 
-### 6.1 MCP 工具（16）
+### 6.1 MCP 工具（23）
 
 | 工具 | 作用 | 含明文 |
 | --- | --- | --- |
@@ -244,10 +249,13 @@ Agent: 读取文件使用 → vault_secret_release → 删除文件
 | `vault_get_secret` | 申请临时使用条目，返回临时文件路径 | 否（协议层） |
 | `vault_secret_status` / `vault_secret_release` | 查询请求/立即删除临时文件 | 否 |
 | `knowledge_search` / `knowledge_list` / `knowledge_get_doc` | 知识库 BM25 / 列表 / 全文切块 | 是（知识库正文） |
-| `search_all` | 文件 + 保险库引用 + 知识库统一检索 | 否（保险库）/是（知识） |
+| `search_all` | 文件 + 保险库引用 + 知识库 + 系统/笔记/待办统一检索（结果带来源账号标注） | 否（保险库）/是（知识） |
 | `files_list` / `files_search` | 文件归档列表 / 名称地址检索 | 否 |
-| `link_read` | popo-cli 读取 KM/POPO 正文 | 是（在线文档） |
-| `popo_spaces` / `popo_list` | 团队空间 / 云空间目录 | 否 |
+| `link_read` | popo-cli 读取 KM/POPO 正文；可选 `accountId`（归属标注+审计，会话由 popo-cli 托管） | 是（在线文档） |
+| `popo_spaces` / `popo_list` | 团队空间 / 云空间目录；可选 `accountId` | 否 |
+| `notes_list` / `notes_add` | 速记列表 / 新增（写经 ingest 队列由应用落库） | 否 |
+| `todos_list` / `todos_add` / `todos_done` | 待办列表 / 新增 / 完成（写经 ingest 队列） | 否 |
+| `events_list` / `events_add` | 日程列表 / 新增（写经 ingest 队列） | 否 |
 
 ### 6.2 CLI
 
@@ -256,19 +264,24 @@ am vault list|search
 am search
 am knowledge list|get
 am files list|search
-am link read <url>
-am popo spaces|ls
+am link read <url> [--account <id>]
+am popo spaces|ls [--account <id>]
+am notes list|add
+am todos list|add|done
+am events list|add
 am mcp status|config|start
+am token list|add|revoke
+am audit tail [n]
 ```
 
 ### 6.3 Tauri 命令（主要）
 
-- 存储：`db_load_all` `db_load_vault` `db_save_docs` `db_save_chunks` `db_delete_chunks` `db_save_files` `db_save_vault` `db_mark_migrated` `db_info`
-- MCP：`mcp_status` `mcp_start` `mcp_stop` `mcp_rotate_token` `mcp_self_test` `mcp_sync_data` `mcp_secret_pending` `mcp_secret_deny` `mcp_secret_fulfill`
+- 存储：`db_load_all` `db_load_vault` `db_save_docs` `db_save_chunks` `db_delete_chunks` `db_save_files` `db_save_vault` `db_save_projects` `db_save_links` `db_save_systems` `db_save_notes` `db_save_todos` `db_save_events` `db_save_accounts` `db_save_vault_attachments` `db_mark_migrated` `db_info`
+- MCP：`mcp_status` `mcp_start` `mcp_stop` `mcp_rotate_token` `mcp_self_test` `mcp_sync_data` `mcp_secret_pending` `mcp_secret_deny` `mcp_secret_fulfill` `mcp_ingest_pending` `mcp_ingest_ack` `mcp_set_lan` `mcp_tokens_list` `mcp_token_add` `mcp_token_revoke` `mcp_audit_tail`
 - POPO：`popo_auth_status/login/refresh/logout` `link_read` `popo_team_spaces` `popo_space_children`
 - Ollama：`ollama_status/install/start/pull`
 - Agent：`agent_probe/run`
-- 通用：`read_text_file` `open_url` `open_path`
+- 通用：`read_text_file` `read_binary_file_base64` `write_text_file` `open_url` `open_path`
 - **旧桩（未使用，待清理/实现）**：`vault_list` `vault_upsert` `vault_get_ref` `knowledge_ingest` `chat_send`
 
 ---
@@ -299,6 +312,11 @@ am mcp status|config|start
 - [x] 主题色 #7f71f1、Font Awesome 图标、无全页滚动 + 自定义滚动条
 - [x] 设置：OpenID 状态、Ollama/Agent、SQLite 路径与数据量
 - [x] MCP smoke 20/20（POPO 22/22）；Rust 密钥写入单测；`npm run build` 通过
+- [x] **项目空间 + 系统导航 + 全局命令面板**（WF1）：projects/entity_links/systems 表；项目聚合文档/文件/密钥/系统/笔记/待办，删除只解关联；导航卡片一键打开/复制凭据（走保险库解锁 + 30 秒清剪贴板）；Ctrl+K/Cmd+K 命令面板聚合 BM25/文件/保险库引用/系统/项目/笔记/待办；聊天命中系统返回系统卡片
+- [x] **笔记/待办/日程 + 今日简报 + MCP 写工具**（WF2）：「事务」三 Tab；聊天智能创建（中文相对日期解析器，自查 8/8）；今日简报卡；MCP 新增 7 工具（共 23），写工具经 ingest 队列应用落库闭环；CLI notes/todos/events；smoke 37/37
+- [x] **跨设备加密同步 + 密钥健康 + 加密附件**（WF3）：.amsync 零知识同步包（独立同步口令 PBKDF2+AES-GCM，文件头无明文；Node 自查 4/4）；通道三类——本地文件夹（已实现）、同步盘/Git 文件夹（同机制）、自托管服务器端点（标「待部署」，仅预留 endpoint+设备 Token 配置，不做上传）；按 id+updatedAt 合并、保险库按本地主密码重加密；expiresAt/env/lastUsedAt 健康标注（7 天黄/过期红，简报汇总）；加密附件（会话密钥，≤5MB，MCP 只标 hasAttachment）
+- [x] **PDF 正文解析**（WF4）：pdfjs-dist 本地打包 worker；逐页抽文本层真实入库，状态「已入库（PDF 解析，N 页）」；无文本层明确提示「未抽到文本（可能是扫描件）」仅登记；Node 实测抽取通过。Word(.docx) 仍仅登记
+- [x] **账号隔离**（WF5）：accounts 表与三类 kind 分组管理；旧 POPO 数据迁移补 accountId 到默认账号「网易 POPO（工作）」；导入前选当前账号、列表徽标与按账号筛选；断开只清该账号（可选移除其文档，默认保留）；聊天/search_all/knowledge_search 结果带账号标注；MCP 在线工具可选 accountId 且审计带 accountId；CLI --account。隔离自查 6/6（迁移/筛选/断开互不影响）。**边界：POPO 会话由 popo-cli 统一托管，多账号会话隔离受 CLI 限制**（数据层隔离已实现，会话层不假装）
 - [x] **V0.3 安全组第一批**：MCP 默认本机绑定 + 局域网显式开关与 CORS 收敛（server_status/health 带 bind/lan）；多客户端 Token 与撤销（tokens.json 热加载，CLI 与面板可管理）；密钥取用/鉴权审计（audit.log JSONL + 面板最近 20 条 + CLI audit tail）；剪贴板 30 秒比对后自动清空；保险库闲置 5 分钟自动锁定（可关）；MCP smoke 扩至 28/28
 
 ---
@@ -321,9 +339,9 @@ am mcp status|config|start
 9. **OpenAI / Claude 真实接入**：当前为本地模拟；需 API Key 管理（可入保险库）、流式响应、错误重试。
 10. **流式输出**：Ollama 与 Agent 目前非流式；改为逐 token/逐行展示与可取消。
 11. **向量/混合检索**：bge-m3 embedding + sqlite-vec / LanceDB；当前 BM25 全量载入内存，数据量大时内存与延迟上升。
-12. **PDF / Word / Excel 解析**：当前仅登记；需文本抽取、表格与页级溯源。
+12. **PDF / Word / Excel 解析**：PDF ✅ WF4 已落地（文本层抽取入库，扫描件仅登记）；剩余 Word(.docx)/Excel 仍仅登记，需文本抽取、表格与页级溯源。
 13. **在线文档自动同步**：ETag/版本校验、权限与删除同步；目前仅手动读取入库。
-14. **MCP 能力扩展**：写工具（如受控 `knowledge_ingest`）、resources/prompts、GET/SSE 与会话、协议版本升级；CLI 对齐 16 工具（含密钥请求）。
+14. **MCP 能力扩展**：notes/todos/events 写工具 ✅ WF2 已落地（ingest 队列落库）；剩余受控 `knowledge_ingest`、resources/prompts、GET/SSE 与会话、协议版本升级。
 15. **保险库匹配识别真实化**：当前候选为模拟结果；需实际扫描 `.ssh`、`.env` 等并预览/去重。
 16. **MCP 密钥策略**：可选「已解锁时自动授权（限定 ref/时长）」、按用途模板、一次性凭据、使用后自动 `release`。
 17. **设置项**：MCP 监听地址/端口、自动启动、临时文件 TTL 默认值、日志级别 UI。
@@ -364,7 +382,10 @@ am mcp status|config|start
 - OpenAI / Claude 模型仍为模拟回复
 - 保险库匹配识别为模拟候选
 - `vault_crypto.rs`、`vault_*`/`knowledge_ingest`/`chat_send` 为旧桩
-- PDF/Word/Excel 不解析正文
+- Word/Excel 不解析正文（PDF 已支持文本层；扫描版 PDF 无文本层仅登记）
+- POPO 多账号**会话**隔离受 popo-cli 限制：登录态由 CLI 统一托管，应用只做数据归属/筛选/断开/审计层隔离
+- 同步的自托管服务器端点未部署：仅预留配置字段；浏览器预览下文件夹同步降级为手动导出/导入文件
+- 本批新增 Rust 命令（db_save_projects/links/systems/notes/todos/events/accounts/vault_attachments、mcp_ingest_pending/ack、write_text_file、read_binary_file_base64）未在 VM 编译（无 cargo），需 Windows cargo check
 - 在线文档仅 KM/POPO 可读；非 KM/POPO 域名仅登记
 - BM25 为关键词检索，无 embedding
 - MCP 局域网 HTTP 明文传输（Token 鉴权）；CSP 未设置
@@ -381,7 +402,8 @@ npm install
 npm run tauri dev          # 桌面端（127.0.0.1:5173）
 npm run build              # tsc + vite
 npm run mcp:start          # 单独启动 MCP
-npm run mcp:smoke          # 20 项；SMOKE_POPO=1 为 22 项
+npm run mcp:smoke          # 39 项；SMOKE_POPO=1 额外测 POPO 在线项
+node scripts/sync-check.mjs  # 同步包加解密自查 4/4
 npm run cli -- search 关键词
 cargo test --manifest-path src-tauri/Cargo.toml   # 含密钥写入单测
 ```
