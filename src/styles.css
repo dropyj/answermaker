@@ -232,3 +232,18 @@ summary { cursor: pointer; font-size: 13px; color: var(--accent); }
 .invite-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
 .invite-list li { display: flex; justify-content: space-between; gap: 10px; }
 .invite-unused { color: #16a34a; font-weight: 600; }
+
+/* 项目详情：关联列表 */
+.proj-detail { margin-top: 10px; border-top: 1px solid #eceef5; padding-top: 10px; display: flex; flex-direction: column; gap: 10px; }
+.proj-group { display: flex; flex-direction: column; }
+.proj-group-title { font-size: 12px; font-weight: 600; color: #8a93a8; letter-spacing: .04em; margin-bottom: 2px; display: flex; align-items: center; }
+.proj-group-title .badge { margin-left: 6px; }
+.proj-member { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 8px; }
+.proj-member + .proj-member { border-top: 1px solid #f3f4fa; }
+.proj-member:hover { background: var(--accent-softer); }
+.proj-member-name { flex: 1; min-width: 0; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.unlink-btn { padding: 4px 10px; font-size: 12px; align-self: center; white-space: nowrap; color: #8a93a8; }
+.unlink-btn:hover:not(:disabled) { background: #fef2f2; border-color: #fca5a5; color: #dc2626; }
+.proj-add { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; background: var(--accent-softer); border: 1px dashed var(--accent-border); border-radius: 10px; padding: 8px 10px; }
+.proj-add select { padding: 7px 8px; border: 1px solid #ccd2e0; border-radius: 8px; font-size: 13px; background: #fff; min-width: 0; }
+.proj-add button { align-self: center; }

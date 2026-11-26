@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import type { FileEntry, KnowledgeDoc, Note, Project, ProjectEntityType, ProjectLink, SystemEntry, Todo } from "../types";
 import { uid } from "../types";
-import { linksWithoutProject, toggleLink } from "../projects";
+import { dedupeLinks, isLinked, linksWithoutProject, removeEntityLinks, toggleLink, typeGroup } from "../projects";
 import { listEncItems } from "../crypto";
 import { vaultRef } from "../types";
 
@@ -57,23 +57,50 @@ export default function Projects({
   const members = useMemo(() => {
     if (!active) return [];
     const out: { link: ProjectLink; label: string }[] = [];
-    for (const l of links.filter((x) => x.projectId === active.id)) {
+    // 去重：同一实体只出现一次（存量数据里可能有 file/link 双份或同步合并产生的重复关联）
+    for (const l of dedupeLinks(links.filter((x) => x.projectId === active.id))) {
       const found = entitiesOf(l.entityType).find((e) => e.id === l.entityId);
       out.push({ link: l, label: found?.label ?? "（实体已删除）" });
     }
+    const order = Object.keys(TYPE_LABEL) as ProjectEntityType[];
+    out.sort((a, b) => order.indexOf(a.link.entityType) - order.indexOf(b.link.entityType) || a.label.localeCompare(b.label));
     return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, links, docs, files, systems, notes, todos]);
 
+  // 按类型分组（保持 TYPE_LABEL 顺序），供详情区分组渲染
+  const memberGroups = useMemo(() => {
+    const groups: { type: ProjectEntityType; items: { link: ProjectLink; label: string }[] }[] = [];
+    for (const m of members) {
+      const g = groups.find((x) => typeGroup(x.type) === typeGroup(m.link.entityType));
+      if (g) g.items.push(m);
+      else groups.push({ type: m.link.entityType, items: [m] });
+    }
+    return groups;
+  }, [members]);
+
   const counts = (pid: string) => {
-    const mine = links.filter((l) => l.projectId === pid);
-    const by = (t: ProjectEntityType) => mine.filter((l) => l.entityType === t).length;
+    // 按实体 id 去重计数：同一实体既在实体自带字段里、又在 links 里时只算一次
+    const mine = dedupeLinks(links.filter((l) => l.projectId === pid));
+    const ids = (t: ProjectEntityType) => new Set(mine.filter((l) => typeGroup(l.entityType) === typeGroup(t)).map((l) => l.entityId));
+    const fileIds = ids("file");
+    const systemIds = ids("system"); systems.filter((s) => s.projectIds.includes(pid)).forEach((s) => systemIds.add(s.id));
+    const noteIds = ids("note"); notes.filter((n) => n.projectId === pid).forEach((n) => noteIds.add(n.id));
+    const todoIds = ids("todo"); todos.filter((t) => t.projectId === pid).forEach((t) => todoIds.add(t.id));
     return {
-      doc: by("doc"), file: by("file") + by("link"), vault: by("vault"),
-      system: systems.filter((s) => s.projectIds.includes(pid)).length + by("system"),
-      note: notes.filter((n) => n.projectId === pid).length + by("note"),
-      todo: todos.filter((t) => t.projectId === pid).length + by("todo"),
+      doc: ids("doc").size, file: fileIds.size, vault: ids("vault").size,
+      system: systemIds.size, note: noteIds.size, todo: todoIds.size,
     };
+  };
+
+  // 添加下拉的可选项：排除已关联到本项目的条目（file/link 跨类型排除），并按 id 去重
+  const addOptions = (type: ProjectEntityType, pid: string) => {
+    const seen = new Set<string>();
+    return entitiesOf(type).filter((e) => {
+      if (seen.has(e.id)) return false;
+      seen.add(e.id);
+      return !isLinked(links, e.id, pid);
+    });
   };
 
   const create = () => {
@@ -142,23 +169,28 @@ export default function Projects({
               {activeId === p.id && (
                 <div className="proj-detail">
                   {members.length === 0 && <div className="dim">暂无关联条目。用下方添加，或到各模块列表项里勾选项目。</div>}
-                  {members.map(({ link, label }) => (
-                    <div key={link.id} className="row" style={{ margin: "4px 0" }}>
-                      <span className="badge">{TYPE_LABEL[link.entityType]}</span>
-                      <button className="linklike" onClick={() => go(TYPE_SECTION[link.entityType], link.entityId)}>{label}</button>
-                      <button onClick={() => setLinks((prev) => toggleLink(prev, link.entityType, link.entityId, p.id, false))}>移除关联</button>
+                  {memberGroups.map((g) => (
+                    <div key={typeGroup(g.type)} className="proj-group">
+                      <div className="proj-group-title">{TYPE_LABEL[g.type]}<span className="badge">{g.items.length}</span></div>
+                      {g.items.map(({ link, label }) => (
+                        <div key={link.id} className="proj-member">
+                          <button className="linklike proj-member-name" onClick={() => go(TYPE_SECTION[link.entityType], link.entityId)} title={label}>{label}</button>
+                          <button className="unlink-btn" onClick={() => setLinks((prev) => removeEntityLinks(prev, link.entityId, p.id))}>移除关联</button>
+                        </div>
+                      ))}
                     </div>
                   ))}
-                  <div className="row">
+                  <div className="proj-add">
                     <select value={addType} onChange={(e) => { setAddType(e.target.value as ProjectEntityType); setAddEntity(""); }}>
                       {(Object.keys(TYPE_LABEL) as ProjectEntityType[]).map((t) => <option key={t} value={t}>{TYPE_LABEL[t]}</option>)}
                     </select>
                     <select value={addEntity} onChange={(e) => setAddEntity(e.target.value)} style={{ flex: 1 }}>
                       <option value="">选择要关联的条目…</option>
-                      {entitiesOf(addType).map((e) => <option key={e.id} value={e.id}>{e.label}</option>)}
+                      {addOptions(addType, p.id).map((e) => <option key={e.id} value={e.id}>{e.label}</option>)}
                     </select>
-                    <button disabled={!addEntity} onClick={() => { setLinks((prev) => toggleLink(prev, addType, addEntity, p.id, true)); setAddEntity(""); }}>添加关联</button>
+                    <button disabled={!addEntity} onClick={() => { setLinks((prev) => dedupeLinks(toggleLink(prev, addType, addEntity, p.id, true))); setAddEntity(""); }}>添加关联</button>
                   </div>
+                  {addOptions(addType, p.id).length === 0 && <div className="dim" style={{ fontSize: 12 }}>该类型的条目已全部关联到本项目（或暂无条目）。</div>}
                 </div>
               )}
             </li>
