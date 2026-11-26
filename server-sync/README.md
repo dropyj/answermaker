@@ -1,6 +1,8 @@
 # AnswerMaker 同步服务端
 
 零依赖 Node 服务，只存储端到端加密的 `.amsync` 同步包（零知识：同步口令永不经过服务器）。
+
+账号体系（v1.1）：邮箱+密码注册/登录（scrypt 哈希、30 天会话 Token），同步包按账号隔离存储。第一个注册的账号为管理员；之后注册需邀请码，在服务器上用 `node sync-server.mjs --create-invite` 生成（一次性）。旧设备 Token 仍兼容，映射到 legacy 命名空间。
 2026-11-26 已部署到用户服务器 111.230.147.240，对外入口为 Caddy 反代：
 `https://heytiger.cn/amsync`（Caddyfile 中 `(amsync)` 片段 → 127.0.0.1:7362）。
 
@@ -9,6 +11,10 @@
 | 方法 | 路径（经 Caddy 时带 /amsync 前缀，剥离后） | 说明 |
 | --- | --- | --- |
 | GET | /health | 无需鉴权，返回 {ok, service, version} |
+| POST | /auth/register | {email, password, inviteCode?} → {token, user, expiresAt}；首个账号免邀请码 |
+| POST | /auth/login | {email, password} → {token, user, expiresAt}；失败限流 5 次/10 分钟 |
+| POST | /auth/logout | Bearer 会话 Token，注销当前会话 |
+| GET | /auth/me | Bearer 会话 Token，返回当前账号 |
 | PUT | /package | Bearer 设备 Token；body 为 .amsync 原文；头 X-Device-Id / X-Device-Name（URL 编码）；保留最近 10 个版本 |
 | GET | /package/latest | Bearer；返回最新包原文 + X-Package-* 头 |
 | GET | /packages | Bearer；版本列表（version/设备/大小/时间） |
