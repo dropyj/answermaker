@@ -511,6 +511,15 @@ export async function pullFromServer(passphrase: string): Promise<SyncPayload> {
   return openSyncPackage(text, passphrase);
 }
 
+/** 拉取指定版本（项7 版本回滚）：下载该版原文 → 同一解密路径 → 返回 payload，合并语义由调用方走既有 merge。 */
+export async function pullVersionFromServer(version: number, passphrase: string): Promise<SyncPayload> {
+  const res = await serverFetch(`/package/v/${version}`);
+  if (res.status === 404) throw new SyncServerError(`服务器上没有版本 v${version}（可能已被保留策略清理，只保留最近 10 版）`, 404);
+  if (!res.ok) throw new SyncServerError(`拉取版本 v${version} 失败：${(await readServerError(res)).message}`, res.status);
+  const text = await res.text();
+  return openSyncPackage(text, passphrase);
+}
+
 /** 服务器版本列表（只读展示：version/设备/时间/大小）。 */
 export async function listServerPackages(): Promise<ServerPackageInfo[]> {
   const res = await serverFetch("/packages");

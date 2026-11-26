@@ -4,7 +4,7 @@ import { call, isTauri } from "../bridge";
 import { decryptAllItems, isUnlocked } from "../crypto";
 import {
   buildSyncPackage, changePassword, checkServerHealth, checkSyncPassphrase, createInvite, fetchMe, getDevice, listInvites, listServerPackages, listSessions,
-  loadSyncSettings, login, logout, openSyncPackage, pullFromServer, pushToServer, register, revokeSession,
+  loadSyncSettings, login, logout, openSyncPackage, pullFromServer, pullVersionFromServer, pushToServer, register, revokeSession,
   saveSyncSettings, setDeviceName, setSyncPassphrase, SYNC_FILENAME, SyncServerError,
   type InviteInfo, type ServerPackageInfo, type ServerSessionInfo, type SyncChannel, type SyncPayload, type SyncSettings,
 } from "../sync";
@@ -379,6 +379,24 @@ export default function SyncPanel({ data, onMerge }: {
     finally { setServerBusy(""); }
   };
 
+  /** 版本回滚（项7）：拉取指定旧版走既有 onMerge 合并（合并语义，非硬覆盖）。 */
+  const doRollback = async (p: ServerPackageInfo) => {
+    setError(""); setMsg("");
+    if (!importPass) { setError("请输入拉取用的同步口令（下方「导入用同步口令」输入框）后再回滚"); return; }
+    if (!window.confirm(`把服务器 v${p.version}（设备「${p.deviceName}」，${new Date(p.updatedAt).toLocaleString()}）拉回并合并到本地？这是合并而非覆盖：本地独有数据会保留。`)) return;
+    setServerBusy("rollback");
+    try {
+      const payload = await pullVersionFromServer(p.version, importPass);
+      const summary = await onMerge(payload);
+      adoptSigRef.current = true;
+      save({ ...loadSyncSettings(), lastSyncAt: Date.now(), lastSyncFrom: payload.deviceName, lastPullAt: Date.now(), lastPullMsg: `回滚合并到 v${p.version}：${summary}` });
+      setSettings(loadSyncSettings());
+      setRemoteNotice(null);
+      setMsg(`已回滚合并到 v${p.version}（来源设备「${payload.deviceName}」）：${summary}。合并语义，本地独有数据未被覆盖清除。`);
+    } catch (e) { setSettings(loadSyncSettings()); setError(e instanceof Error ? e.message : "回滚失败"); }
+    finally { setServerBusy(""); }
+  };
+
   const doListPkgs = async () => {
     setError(""); setMsg(""); setServerBusy("list");
     try { setServerPkgs(await listServerPackages()); }
@@ -575,8 +593,16 @@ export default function SyncPanel({ data, onMerge }: {
               ? <p className="dim">服务器上暂无同步包。</p>
               : (
                 <ul className="dim" style={{ margin: "4px 0 0", paddingLeft: 18 }}>
-                  {serverPkgs.map((p) => (
-                    <li key={p.version}>v{p.version} · 设备「{p.deviceName}」 · {new Date(p.updatedAt).toLocaleString()} · {p.size} 字节</li>
+                  {serverPkgs.map((p, i) => (
+                    <li key={p.version}>
+                      v{p.version} · 设备「{p.deviceName}」 · {new Date(p.updatedAt).toLocaleString()} · {p.size} 字节
+                      {i > 0 && (
+                        <button disabled={serverBusy !== ""} onClick={() => void doRollback(p)} style={{ marginLeft: 8 }}>
+                          {serverBusy === "rollback" ? "回滚中…" : "回滚到此版本"}
+                        </button>
+                      )}
+                      {i === 0 && <span className="badge ok">最新</span>}
+                    </li>
                   ))}
                 </ul>
               )

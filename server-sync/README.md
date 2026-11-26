@@ -16,6 +16,7 @@
 | POST | /auth/logout | Bearer 会话 Token，注销当前会话 |
 | GET | /auth/me | Bearer 会话 Token，返回当前账号 |
 | GET | /auth/sessions | Bearer 会话 Token，返回本账号登录设备列表 `{sessions:[{id, deviceName, createdAt, expiresAt, current}]}`（不回 token/hash；旧会话无 id 时服务端惰性补发并落盘） |
+| GET | /package/v/:version | Bearer，返回指定版本同步包原文与 `X-Package-Version/Updated-At/Device` 头（版本回滚用，客户端解密后走合并而非覆盖）；不存在返回 404 `{error:"version_not_found"}` |
 | DELETE | /auth/sessions/:id | Bearer 会话 Token，吊销指定会话（踢下线）；吊销当前会话返回 403 `{error:"cannot_revoke_current"}`，不存在返回 404 `{error:"session_not_found"}` |
 | PUT | /package | Bearer 设备 Token；body 为 .amsync 原文；头 X-Device-Id / X-Device-Name（URL 编码）；保留最近 10 个版本 |
 | GET | /package/latest | Bearer；返回最新包原文 + X-Package-* 头 |

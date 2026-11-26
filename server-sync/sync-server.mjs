@@ -20,6 +20,7 @@
 //   PUT  /package         (Bearer)  body = .amsync JSON, X-Device-Id / X-Device-Name headers
 //   GET  /package/latest  (Bearer)
 //   GET  /packages        (Bearer)  last 10 versions of the caller's namespace
+//   GET  /package/v/:version (Bearer)  one specific version's raw package (rollback); 404 version_not_found
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -366,6 +367,19 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && url.pathname === '/packages') {
     const index = loadIndex(ns);
     return json(res, 200, { packages: [...index].reverse().map(({ version, deviceName, size, updatedAt }) => ({ version, deviceName, size, updatedAt })) });
+  }
+
+  if (req.method === 'GET' && url.pathname.startsWith('/package/v/')) {
+    const version = Number(url.pathname.slice('/package/v/'.length));
+    const index = loadIndex(ns);
+    const meta = index.find(m => m.version === version);
+    const file = path.join(pkgDir(ns), `pkg-${version}.amsync`);
+    if (!meta || !fs.existsSync(file)) return json(res, 404, { error: 'version_not_found' });
+    const body = fs.readFileSync(file, 'utf8');
+    cors(res);
+    res.writeHead(200, { 'Content-Type': 'application/json', 'X-Package-Version': String(meta.version), 'X-Package-Updated-At': meta.updatedAt, 'X-Package-Device': encodeURIComponent(meta.deviceName) });
+    audit({ event: 'pull_version', ns, version: meta.version });
+    res.end(body); return;
   }
 
   return json(res, 404, { error: 'not_found' });

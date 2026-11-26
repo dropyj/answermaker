@@ -455,3 +455,11 @@ cargo test --manifest-path src-tauri/Cargo.toml   # 含密钥写入单测
 - Node 不打包：启动检测 node_version，未装时报错与 MCP 面板都给安装指引。
 - updater：tauri-plugin-updater + tauri-plugin-process 已注册，公钥在 tauri.conf.json，端点 https://heytiger.cn/updates/{{target}}/{{current_version}}，createUpdaterArtifacts 已开；私钥在工作区 .updater/（gitignore）。代码签名无证书跳过（SmartScreen 提示已写进设置页与 README）。
 - 待联调：服务器 /updates/ 静态目录与 latest.json 发布流程需在首次正式发版时在服务器侧落地并实测一次完整升级。
+
+
+## 同步增强（项5/6/7，已落地）
+
+- 登录设备管理（项5）：会话带 id；`GET /auth/sessions` 列本账号设备（current 标记，不回 token/hash，旧会话惰性补 id），`DELETE /auth/sessions/:id` 踢下线（当前会话 403 cannot_revoke_current）。SyncPanel 账号卡下有设备列表。服务端本地实测：双登录→列表→吊销另一台→该会话 401，通过。
+- 自动同步与冲突提示（项6）：SyncSettings.autoSync 默认关；开启且本会话口令验证通过时，数据签名（七类负载的长度+djb2 哈希）变化后防抖 15 秒静默推送（pushCore 与手动共用），失败只更新状态行。面板挂载时查最新版本：服务器较新且本地无变更→可拉取提示；两边都有变更→冲突条（双方版本/时间 + 拉取合并/推送按钮）。拉取合并后的签名由采纳机制写为新基线，不误报本地变更。
+- 版本回滚（项7）：`GET /package/v/:version` 返回指定版本原文（不存在 404 version_not_found）；客户端 pullVersionFromServer 复用解密路径，版本列表里非最新版可「回滚到此版本」，走 onMerge 合并语义而非覆盖，完成提示写明已回滚合并到 vX。本地实测：推两版→拉 v1 解密与原文一致，通过。
+- 注意：server-sync 的改动（项5/7）需部署到服务器才生效（同步服务走既有部署方式更新 sync-server.mjs 并重启 answermaker-sync 单元）；客户端先行发布时，新端点 404 会被面板当作加载失败提示，不影响既有手动同步。
