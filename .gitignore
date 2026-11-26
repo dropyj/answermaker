@@ -1,13 +1,50 @@
+# 依赖与构建产物
 node_modules/
 dist/
 src-tauri/target/
-.DS_Store
+tsconfig.tsbuildinfo
+src-tauri/gen/schemas/
+*.zip
 
-# MCP runtime data: tokens, secret request queues, snapshots, logs — never commit
+# 本地数据与敏感信息（整个 server/data 含 Token、密钥请求队列、日志与导出快照）
 server/data/
+**/secret-requests/
+**/secret-responses/
 mcp-token.txt
-*.log
-*.db
-.env
+mcp-runtime.json
 
-*.tsbuildinfo
+# 数据库（应用数据库位于 %APPDATA%/AnswerMaker，项目内如出现也不提交）
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# 环境变量、私钥与证书
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+
+# 日志与临时文件
+*.log
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.local
+*.tmp
+
+# 操作系统 / 编辑器
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+
+# 旧版本目录（已删除，防止再次误入）
+answermaker-v0.2/
