@@ -32,7 +32,7 @@ const TOOLS: { name: string; scope: string; desc: string }[] = [
   { name: "server_status", scope: "app:read", desc: "运行状态、数据量、popo-cli 可用性" },
   { name: "vault_list_refs", scope: "vault:read", desc: "保险库引用与元数据，不含明文" },
   { name: "vault_search", scope: "vault:read", desc: "按 key/type/url 检索保险库引用" },
-  { name: "vault_get_secret", scope: "vault:secret", desc: "申请临时文件地址；需应用内授权，响应不含明文" },
+  { name: "vault_get_secret", scope: "vault:secret", desc: "申请临时文件地址；需应用内授权，文件为一次性密钥 AES-256-GCM 加密信封，响应含解密密钥不含明文" },
   { name: "vault_secret_status", scope: "vault:secret", desc: "查询请求状态、临时文件路径与到期时间" },
   { name: "vault_secret_release", scope: "vault:secret", desc: "使用完凭据后立即删除临时文件" },
   { name: "knowledge_search", scope: "knowledge:read", desc: "知识库关键词检索，返回命中片段与来源" },

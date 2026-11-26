@@ -4,6 +4,7 @@
 // 可选：SMOKE_VERBOSE=1 打印服务端日志；SMOKE_POPO=1 额外测试 POPO 空间/链接读取。
 
 import { spawn } from "node:child_process";
+import { createDecipheriv } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -271,6 +272,38 @@ try {
         const audit2 = readFileSync(auditPath, "utf8");
         check("secret_request audited", secOut.status === "pending" && audit2.includes('"event":"secret_request"') && audit2.includes(firstRef.ref));
         try { rmSync(join(root, "server", "data", "secret-requests", secOut.requestId + ".json"), { force: true }); } catch { /* ignore */ }
+
+        // ---- 项1：临时密钥文件加密暂存（模拟应用履约写明文 → 服务端加密重写） ----
+        const sec2 = await rpc("tools/call", { name: "vault_get_secret", arguments: { ref: firstRef.ref, waitMs: 0 } });
+        const sec2Out = JSON.parse(sec2.json?.result?.content?.[0]?.text ?? "{}");
+        const rid = sec2Out.requestId;
+        const reqFile = JSON.parse(readFileSync(join(root, "server", "data", "secret-requests", rid + ".json"), "utf8"));
+        check("secret default ttl is 60", reqFile.ttlSec === 60, `ttlSec=${reqFile.ttlSec}`);
+        const marker = "SMOKE_SECRET_PLAIN_12345";
+        const tempDir = join(tmpdir(), "answermaker-secrets");
+        const tempPath = join(tempDir, rid + ".json");
+        writeFileSync(tempPath, JSON.stringify({ key: "smoke", type: "api-key", account: "", value: marker, url: "" }, null, 2));
+        writeFileSync(join(root, "server", "data", "secret-responses", rid + ".json"), JSON.stringify({
+          id: rid, status: "ready", path: tempPath, ref: firstRef.ref, ttlSec: 60, expiresAt: Date.now() + 60000, createdAt: Date.now(),
+        }));
+        const st2 = await rpc("tools/call", { name: "vault_secret_status", arguments: { requestId: rid } });
+        const st2Out = JSON.parse(st2.json?.result?.content?.[0]?.text ?? "{}");
+        check("secret ready returns decryptKey + format", st2Out.status === "ready" && st2Out.format === "aes-256-gcm" && typeof st2Out.decryptKey === "string" && st2Out.decryptKey.length > 0);
+        const fileText = readFileSync(tempPath, "utf8");
+        check("temp secret file has no plaintext", !fileText.includes(marker) && !fileText.includes('"value"'));
+        let decrypted = "";
+        try {
+          const env2 = JSON.parse(fileText);
+          const decipher = createDecipheriv("aes-256-gcm", Buffer.from(st2Out.decryptKey, "base64"), Buffer.from(env2.iv, "base64"));
+          decipher.setAuthTag(Buffer.from(env2.tag, "base64"));
+          decrypted = Buffer.concat([decipher.update(Buffer.from(env2.ct, "base64")), decipher.final()]).toString("utf8");
+        } catch { /* check below fails */ }
+        check("temp secret decrypts with one-time key", decrypted.includes(marker));
+        const audit3 = readFileSync(auditPath, "utf8");
+        check("audit log has no decryptKey/plaintext", !audit3.includes(st2Out.decryptKey) && !audit3.includes(marker));
+        const rel2 = await rpc("tools/call", { name: "vault_secret_release", arguments: { requestId: rid } });
+        const rel2Out = JSON.parse(rel2.json?.result?.content?.[0]?.text ?? "{}");
+        check("secret release removes encrypted file", rel2Out.status === "released" && !existsSync(tempPath));
       } else {
         check("secret_request audited", true, "skip（无保险库引用）");
       }

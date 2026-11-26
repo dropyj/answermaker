@@ -13,7 +13,7 @@
 // POPO：link_read / popo_spaces / popo_list 经 popo-cli（OpenID 登录）读取。
 
 import http from "node:http";
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID, createCipheriv } from "node:crypto";
 import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync, unlinkSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -359,12 +359,70 @@ function resolveVaultRef(args) {
   return found;
 }
 
+const SECRET_FORMAT = "aes-256-gcm";
+
+/**
+ * 临时密钥文件加密暂存：应用（Rust）履约时先把条目明文写进 %TEMP%/answermaker-secrets/，
+ * 本服务端在把路径交给调用方之前（状态查询 / get_secret 等待循环 / 每秒后台扫描）
+ * 立即用一次性随机密钥 AES-256-GCM 加密重写该文件：落盘文件只含 {format, iv, ct, tag}，
+ * 一次性密钥（decryptKey，base64 的 32 字节）只出现在工具响应里，绝不落盘、不进审计。
+ * 已知限制：Rust 写入与本服务端加密之间存在极短的明文窗口（后台扫描周期 1 秒；
+ * 正常授权流程中 get_secret 的等待循环会在 200ms 内触发加密）。窗口说明见 docs。
+ */
+function encryptReadySecret(id, res) {
+  if (!res || res.status !== "ready" || res.encrypted) return res;
+  if (typeof res.path !== "string" || !res.path.startsWith(SECRET_TEMP_DIR) || !existsSync(res.path)) return res;
+  let plain;
+  try { plain = readFileSync(res.path); } catch { return res; }
+  // 已是加密信封（例如重复处理）时不重复加密；但密钥已不可恢复，直接判过期避免误发。
+  try {
+    const parsed = JSON.parse(plain.toString("utf8"));
+    if (parsed && parsed.format === SECRET_FORMAT) {
+      return { ...res, status: "expired", message: "临时文件已加密但一次性密钥不可用，请重新发起 vault_get_secret" };
+    }
+  } catch { /* 非 JSON 明文也照常加密 */ }
+  const key = randomBytes(32);
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const ct = Buffer.concat([cipher.update(plain), cipher.final()]);
+  const envelope = {
+    format: SECRET_FORMAT,
+    iv: iv.toString("base64"),
+    ct: ct.toString("base64"),
+    tag: cipher.getAuthTag().toString("base64"),
+  };
+  writeFileSync(res.path, JSON.stringify(envelope, null, 2));
+  const updated = {
+    ...res,
+    encrypted: true,
+    format: SECRET_FORMAT,
+    decryptKey: key.toString("base64"),
+  };
+  try { writeJsonFile(join(SECRET_RESPONSE_DIR, id + ".json"), updated); } catch { /* ignore */ }
+  return updated;
+}
+
+/** 后台扫描：把已履约但尚未加密的临时文件尽快加密，缩短明文窗口；同时做过期清扫。 */
+function sweepEncryptSecrets() {
+  ensureSecretDirs();
+  try {
+    for (const name of readdirSync(SECRET_RESPONSE_DIR)) {
+      if (!name.endsWith(".json")) continue;
+      const res = readJsonFile(join(SECRET_RESPONSE_DIR, name));
+      if (res && res.status === "ready" && !res.encrypted) {
+        encryptReadySecret(name.slice(0, -5), res);
+      }
+    }
+  } catch { /* ignore */ }
+  sweepSecrets();
+}
+
 function secretResult(id, res, request) {
   if (res.status === "ready") {
     if (!res.path || !existsSync(res.path)) {
       return { status: "expired", requestId: id, message: "临时文件已过期或被删除，请重新发起 vault_get_secret" };
     }
-    return {
+    const base = {
       status: "ready",
       requestId: id,
       path: res.path,
@@ -373,6 +431,17 @@ function secretResult(id, res, request) {
       type: request.type ?? "",
       ttlSec: res.ttlSec,
       expiresAt: res.expiresAt,
+    };
+    if (res.encrypted && res.decryptKey) {
+      return {
+        ...base,
+        format: SECRET_FORMAT,
+        decryptKey: res.decryptKey,
+        message: "临时文件已用一次性密钥 AES-256-GCM 加密（文件内容为 {format, iv, ct, tag} 的 base64 信封，无明文）。用 decryptKey（base64，32 字节）在本地解密：AES-256-GCM，iv/tag 取文件内字段，解密后为条目明文 JSON（key/type/account/value/url）。请立即使用，勿写入日志或提交仓库；用后调用 vault_secret_release。",
+      };
+    }
+    return {
+      ...base,
       message: "临时文件为条目明文 JSON（key/type/account/value/url）。请立即使用，勿写入日志或提交仓库；用后调用 vault_secret_release。",
     };
   }
@@ -406,7 +475,7 @@ async function vaultGetSecret(args, client = "unknown") {
   const deadline = nowMs() + waitMs;
   while (nowMs() <= deadline) {
     const res = readJsonFile(join(SECRET_RESPONSE_DIR, id + ".json"));
-    if (res) return secretResult(id, res, request);
+    if (res) return secretResult(id, encryptReadySecret(id, res), request);
     await new Promise((r) => setTimeout(r, 200));
   }
   return {
@@ -428,7 +497,7 @@ function vaultSecretStatus(args, client = "unknown") {
   const res = readJsonFile(join(SECRET_RESPONSE_DIR, id + ".json"));
   if (res) {
     const request = readJsonFile(join(SECRET_REQUEST_DIR, id + ".json")) ?? {};
-    const out = secretResult(id, res, request);
+    const out = secretResult(id, encryptReadySecret(id, res), request);
     audit({ client, event: "secret_status", tool: "vault_secret_status", ref: out.ref ?? request.ref ?? "", result: out.status });
     return out;
   }
@@ -559,7 +628,7 @@ const TOOLS = [
   {
     name: "vault_get_secret",
     description:
-      "请求临时使用某个保险库条目：需 AnswerMaker 运行且保险库已解锁，由用户在应用内授权后，返回一个短期有效的本地临时文件路径（协议响应不返回明文）。",
+      "请求临时使用某个保险库条目：需 AnswerMaker 运行且保险库已解锁，由用户在应用内授权后，返回一个短期有效的本地临时文件路径（协议响应不返回明文）。临时文件为一次性密钥 AES-256-GCM 加密信封，ready 响应含 format 与 decryptKey 供本地解密。",
     inputSchema: {
       type: "object",
       properties: {
@@ -573,7 +642,7 @@ const TOOLS = [
   },
   {
     name: "vault_secret_status",
-    description: "查询 vault_get_secret 请求状态；ready 时返回临时文件路径与到期时间，仍不返回明文。",
+    description: "查询 vault_get_secret 请求状态；ready 时返回临时文件路径、到期时间与一次性解密密钥（decryptKey），协议响应不返回条目明文。",
     inputSchema: { type: "object", properties: { requestId: { type: "string" } }, required: ["requestId"] },
   },
   {
@@ -1012,6 +1081,10 @@ process.on("unhandledRejection", (e) => log("error", "unhandledRejection", { mes
 
 actualPort = await listenWithFallback(BASE_PORT);
 writeRuntime(actualPort);
+
+// 临时密钥文件：每秒扫描已履约未加密的响应并立即加密（缩短明文窗口）+ 过期清扫。
+const secretSweepTimer = setInterval(sweepEncryptSecrets, 1000);
+secretSweepTimer.unref?.();
 
 console.log(`AnswerMaker MCP server listening on http://${BIND_HOST}:${actualPort}/mcp`);
 if (IS_LAN) {
