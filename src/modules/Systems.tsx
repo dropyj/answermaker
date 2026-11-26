@@ -39,6 +39,65 @@ export function SystemHitCard({ sys, accounts = [] }: { sys: SystemEntry; accoun
   );
 }
 
+/** 系统导航列表卡片：头部（图标+名称+域名+账号徽标）→ 描述 → 关键词 chips → 操作行 → 底部（项目归属 + 编辑/删除）。 */
+function SystemCard({ s, accounts, projects, links, setLinks, iconOk, setIconOk, onEdit, onDelete }: {
+  s: SystemEntry;
+  accounts: Account[];
+  projects: Project[];
+  links: ProjectLink[];
+  setLinks: Dispatch<SetStateAction<ProjectLink[]>>;
+  iconOk: Record<string, boolean>;
+  setIconOk: Dispatch<SetStateAction<Record<string, boolean>>>;
+  onEdit: (s: SystemEntry) => void;
+  onDelete: (s: SystemEntry) => void;
+}) {
+  const [msg, setMsg] = useState("");
+  const acct = accounts.find((a) => a.id === s.accountId);
+  const openSys = async () => {
+    if (isTauri()) { try { await call("open_url", { url: s.url }); return; } catch { /* fallback */ } }
+    window.open(s.url, "_blank", "noopener,noreferrer");
+  };
+  const copyCred = async (mode: "account" | "value") => {
+    try {
+      const text = await copySystemCredential(s, mode);
+      scheduleClipboardClear(text);
+      setMsg(mode === "account" ? "账号已复制（30 秒后自动清剪贴板）" : "密码已复制（30 秒后自动清剪贴板）");
+    } catch (e) { setMsg(e instanceof Error ? e.message : String(e)); }
+  };
+  const kws = s.keywords.split(/\s+/).filter(Boolean).slice(0, 6);
+  return (
+    <div className="card sys-card" data-focus={s.id}>
+      <div className="sys-head">
+        {s.iconUrl && iconOk[s.id] !== false
+          ? <img className="sys-icon" src={s.iconUrl} alt="" onError={() => setIconOk((m) => ({ ...m, [s.id]: false }))} />
+          : <span className="sys-icon fallback">{(s.name.trim()[0] ?? "S").toUpperCase()}</span>}
+        <div className="sys-title">
+          <div className="sys-name" title={s.name}>{s.name}</div>
+          <div className="sys-domain mono" title={s.url}>{systemDomain(s.url)}</div>
+        </div>
+        {acct && <span className="badge sys-acct">{acct.label}</span>}
+      </div>
+      {s.description && <div className="sys-desc" title={s.description}>{s.description}</div>}
+      {kws.length > 0 && (
+        <div className="sys-kws">{kws.map((k) => <span key={k} className="kw-chip">{k}</span>)}</div>
+      )}
+      <div className="sys-actions">
+        <button className="sys-open" onClick={() => void openSys()}>打开</button>
+        {s.vaultItemId && <button onClick={() => void copyCred("account")}>复制账号</button>}
+        {s.vaultItemId && <button onClick={() => void copyCred("value")}>复制密码</button>}
+      </div>
+      {msg && <div className="dim sys-msg">{msg}</div>}
+      <div className="sys-foot">
+        <ProjectPicker projects={projects} links={links} entityType="system" entityId={s.id} setLinks={(n) => setLinks(n)} />
+        <span className="sys-foot-btns">
+          <button className="mini-btn" onClick={() => onEdit(s)}>编辑</button>
+          <button className="mini-btn danger" onClick={() => onDelete(s)}>删除</button>
+        </span>
+      </div>
+    </div>
+  );
+}
+
 export default function Systems({
   systems, setSystems, projects, links, setLinks, accounts = [], focusId,
 }: {
@@ -136,31 +195,12 @@ export default function Systems({
       </div>
 
       <div className="sys-grid">
-        {shown.map((s) => {
-          const acct = accounts.find((a) => a.id === s.accountId);
-          return (
-            <div key={s.id} className="card sys-card" data-focus={s.id}>
-              <div className="sys-head">
-                {s.iconUrl && iconOk[s.id] !== false
-                  ? <img className="sys-icon" src={s.iconUrl} alt="" onError={() => setIconOk((m) => ({ ...m, [s.id]: false }))} />
-                  : <span className="sys-icon fallback">{(s.name.trim()[0] ?? "S").toUpperCase()}</span>}
-                <div>
-                  <strong>{s.name}</strong>
-                  <div className="dim mono">{systemDomain(s.url)}</div>
-                </div>
-                {acct && <span className="badge">{acct.label}</span>}
-              </div>
-              {s.description && <div>{s.description}</div>}
-              {s.keywords && <div className="dim">关键词：{s.keywords}</div>}
-              <SystemHitCard sys={s} accounts={accounts} />
-              <ProjectPicker projects={projects} links={links} entityType="system" entityId={s.id} setLinks={(n) => setLinks(n)} />
-              <div className="row" style={{ margin: 0 }}>
-                <button onClick={() => startEdit(s)}>编辑</button>
-                <button onClick={() => setSystems((prev) => prev.filter((x) => x.id !== s.id))}>删除</button>
-              </div>
-            </div>
-          );
-        })}
+        {shown.map((s) => (
+          <SystemCard key={s.id} s={s} accounts={accounts} projects={projects} links={links} setLinks={setLinks}
+            iconOk={iconOk} setIconOk={setIconOk}
+            onEdit={startEdit}
+            onDelete={(x) => setSystems((prev) => prev.filter((y) => y.id !== x.id))} />
+        ))}
         {shown.length === 0 && <div className="dim">没有匹配的系统。新增时把「功能一句话」和关键词写全，之后搜功能就能找到。</div>}
       </div>
     </div>
