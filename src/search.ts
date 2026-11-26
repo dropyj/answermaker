@@ -6,6 +6,7 @@
 
 import type { SearchHit } from "./types";
 import { deleteChunks as dbDeleteChunks, saveChunks as dbSaveChunks } from "./db";
+import { applyFeedback } from "./feedback";
 
 const CHUNKS_KEY = "am_chunks_v2";
 export const CHUNK_SIZE = 512;
@@ -127,5 +128,9 @@ export function bm25Search(query: string, docNames: Map<string, string>, limit =
     }
     return { docId: d.docId, docName: docNames.get(d.docId) ?? d.docId, chunkIndex: d.chunkIndex, text: d.text, score };
   });
-  return scored.filter((s) => s.score > 0).sort((a, b2) => b2.score - a.score).slice(0, limit);
+  const hits = scored.filter((s) => s.score > 0).sort((a, b2) => b2.score - a.score);
+  // 项3b 召回反馈：在最终排序前叠加反馈调整（±15% 封顶），再截取 limit。
+  // 无反馈记录时 applyFeedback 原样返回，行为与接入前完全一致。
+  // 项3 向量通道接入后，基础分改为 hybrid 分的位置也在此处（先混合再过反馈）。
+  return applyFeedback(query, hits).slice(0, limit);
 }

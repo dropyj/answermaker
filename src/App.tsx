@@ -30,6 +30,7 @@ import { installMcpSync, scheduleMcpSync } from "./mcpSync";
 import { isMcpFollowMain } from "./mcpPrefs";
 import { loadAppData, saveDocs as saveDocsDb, saveFiles as saveFilesDb, saveProjects as saveProjectsDb, saveLinks as saveLinksDb, saveSystems as saveSystemsDb, saveNotes as saveNotesDb, saveTodos as saveTodosDb, saveEvents as saveEventsDb, saveAttachments as saveAttachmentsDb, saveAccounts as saveAccountsDb } from "./db";
 import { initChunks } from "./search";
+import { initFeedback, chunkIdOf, explicitSignalOf, recordOpenFeedback, setExplicitFeedback } from "./feedback";
 import { initVaultStore } from "./crypto";
 import type { Account, AgentCli, CalEvent, ChatMessage, ChatMode, FileEntry, KnowledgeDoc, ModelId, Note, OllamaStatus, Project, ProjectLink, SearchHit, SecretRequest, SystemEntry, Todo, VaultHit } from "./types";
 
@@ -119,6 +120,18 @@ function HitCard({ hit, query, origin }: { hit: SearchHit; query: string; origin
   const [open, setOpen] = useState(false);
   const isUrl = !!origin && /^https?:\/\//i.test(origin);
 
+  // 召回反馈（项3b）：👍/👎 显式信号（再点同向撤销）；展开/打开来源记弱正反馈。
+  const chunkId = chunkIdOf(hit.docId, hit.chunkIndex);
+  const [fbSignal, setFbSignal] = useState(() => explicitSignalOf(query, chunkId));
+  useEffect(() => {
+    const sync = () => setFbSignal(explicitSignalOf(query, chunkId));
+    sync();
+    window.addEventListener("am:feedback-changed", sync);
+    return () => window.removeEventListener("am:feedback-changed", sync);
+  }, [query, chunkId]);
+  const vote = (signal: 1 | -1) => setFbSignal(setExplicitFeedback(query, hit, signal));
+  const noteOpen = () => recordOpenFeedback(query, hit);
+
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(hit.text);
@@ -138,17 +151,34 @@ function HitCard({ hit, query, origin }: { hit: SearchHit; query: string; origin
 
   const openSource = async () => {
     if (!origin) return;
+    noteOpen();
     if (isTauri()) {
       try { await call("open_url", { url: origin }); return; } catch { /* fallback */ }
     }
     window.open(origin, "_blank", "noopener,noreferrer");
   };
 
+  const toggleOpen = () => {
+    if (!open) noteOpen();
+    setOpen((v) => !v);
+  };
+
   return (
     <div className={open ? "hit open" : "hit"}>
       <div className="hit-head">
-        <div className="dim">《{hit.docName}》· 片段 {hit.chunkIndex + 1} · BM25 {hit.score.toFixed(2)}</div>
-        <button className="hit-toggle" onClick={() => setOpen((v) => !v)}>{open ? "收起 ▲" : "展开 ▾"}</button>
+        <div className="dim">
+          《{hit.docName}》· 片段 {hit.chunkIndex + 1} ·{" "}
+          {hit.bm25Score != null && hit.fbAdj
+            ? <>基础 {hit.bm25Score.toFixed(2)} · 反馈 {hit.fbAdj >= 0 ? "+" : ""}{hit.fbAdj.toFixed(2)} · 综合 {hit.score.toFixed(2)}</>
+            : <>BM25 {hit.score.toFixed(2)}</>}
+          {hit.fbDir === "up" && <span className="fb-note up"> · 因你的反馈加权</span>}
+          {hit.fbDir === "down" && <span className="fb-note down"> · 因你的反馈降权</span>}
+        </div>
+        <span className="fb-btns">
+          <button className={fbSignal === 1 ? "fb-btn on-up" : "fb-btn"} title="这条对我有用（再点撤销）" onClick={() => vote(1)}>👍</button>
+          <button className={fbSignal === -1 ? "fb-btn on-down" : "fb-btn"} title="这条不相关（再点撤销）" onClick={() => vote(-1)}>👎</button>
+          <button className="hit-toggle" onClick={toggleOpen}>{open ? "收起 ▲" : "展开 ▾"}</button>
+        </span>
       </div>
       <div className="hit-source">
         <span className="dim">来源：</span>
@@ -229,6 +259,7 @@ export default function App() {
       try {
         const snap = await loadAppData();
         initChunks(snap.chunks);
+        initFeedback(snap.feedback ?? []);
         await initVaultStore(snap.vault);
         const restored = normalizeDocs(snap.docs);
         if (!alive) return;
@@ -650,7 +681,7 @@ export default function App() {
         {section === "projects" && <Projects projects={projects} setProjects={setProjects} links={links} setLinks={setLinks} docs={docs} files={files} systems={systems} notes={notes} todos={todos} go={go} />}
         {section === "tasks" && <Tasks notes={notes} setNotes={setNotes} todos={todos} setTodos={setTodos} events={events} setEvents={setEvents} projects={projects} focusId={focusId} />}
         {section === "mcp" && <Mcp />}
-        {section === "settings" && <Settings syncData={{ projects, links, systems, notes, todos, events, accounts }} onSyncMerge={mergeSyncPayload} accountsData={{ accounts, setAccounts, docs, setDocs, files, setFiles }} />}
+        {section === "settings" && <Settings syncData={{ projects, links, systems, notes, todos, events, accounts }} onSyncMerge={mergeSyncPayload} accountsData={{ accounts, setAccounts, docs, setDocs, files, setFiles }} feedbackDocs={docs} />}
         {section === "chat" && (
           <div className="chatwrap">
             <div className="chatmain">

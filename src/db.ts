@@ -4,7 +4,7 @@
 // localStorage 原始键保留作为备份，之后所有读写都以 SQLite 为准。
 
 import { call, isTauri } from "./bridge";
-import type { Account, CalEvent, FileEntry, KnowledgeDoc, Note, Project, ProjectLink, SystemEntry, Todo } from "./types";
+import type { Account, CalEvent, FileEntry, KnowledgeDoc, Note, Project, ProjectLink, RetrievalFeedback, SystemEntry, Todo } from "./types";
 
 export type VaultSnapshot = { meta: unknown | null; items: unknown[] };
 
@@ -21,6 +21,7 @@ export type DbSnapshot = {
   events: CalEvent[];
   accounts: Account[];
   attachments: unknown[];
+  feedback: RetrievalFeedback[];
   migrated: boolean;
 };
 
@@ -38,6 +39,7 @@ const KEYS = {
   events: "am_events",
   accounts: "am_accounts",
   attachments: "am_vault_attachments",
+  feedback: "am_feedback",
 };
 
 function read<T>(key: string, fallback: T): T {
@@ -86,6 +88,7 @@ function localSnapshot(): DbSnapshot {
     events: read<CalEvent[]>(KEYS.events, []),
     accounts: read<Account[]>(KEYS.accounts, []),
     attachments: read<unknown[]>(KEYS.attachments, []),
+    feedback: read<RetrievalFeedback[]>(KEYS.feedback, []),
     migrated: true,
   };
 }
@@ -105,6 +108,7 @@ async function importLocal(snap: DbSnapshot) {
   await call("db_save_events", { items: snap.events });
   await call("db_save_accounts", { items: snap.accounts });
   await call("db_save_vault_attachments", { items: snap.attachments });
+  await call("db_save_feedback", { items: snap.feedback });
   await call("db_mark_migrated");
 }
 
@@ -223,6 +227,14 @@ export const saveTodos = makeSaver<Todo>(KEYS.todos, "db_save_todos");
 export const saveEvents = makeSaver<CalEvent>(KEYS.events, "db_save_events");
 export const saveAccounts = makeSaver<Account>(KEYS.accounts, "db_save_accounts");
 export const saveAttachments = makeSaver<unknown>(KEYS.attachments, "db_save_vault_attachments");
+/** 召回反馈（项3b）：桌面端存 SQLite retrieval_feedback 列式表，浏览器回退 localStorage。 */
+export async function saveFeedback(items: RetrievalFeedback[]) {
+  if (!isTauri()) {
+    try { localStorage.setItem(KEYS.feedback, JSON.stringify(items)); } catch { /* ignore */ }
+    return;
+  }
+  await call("db_save_feedback", { items });
+}
 
 /** 存储信息（设置页展示 SQLite 路径与数据量）。 */
 export type DbInfo = {

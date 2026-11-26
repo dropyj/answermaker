@@ -13,13 +13,15 @@ const fmtTime = (iso?: string | null) => {
 
 import SyncPanel, { type SyncData } from "./SyncPanel";
 import AccountsPanel from "./AccountsPanel";
+import FeedbackPanel from "./FeedbackPanel";
 import type { Account, FileEntry, KnowledgeDoc } from "../types";
 import type { Dispatch, SetStateAction } from "react";
 import type { SyncPayload } from "../sync";
 
-export default function Settings({ syncData, onSyncMerge, accountsData }: {
+export default function Settings({ syncData, onSyncMerge, accountsData, feedbackDocs }: {
   syncData?: SyncData;
   onSyncMerge?: (payload: SyncPayload) => Promise<string>;
+  feedbackDocs?: KnowledgeDoc[];
   accountsData?: {
     accounts: Account[];
     setAccounts: Dispatch<SetStateAction<Account[]>>;
@@ -206,6 +208,7 @@ export default function Settings({ syncData, onSyncMerge, accountsData }: {
       <h2>设置 Settings</h2>
       {accountsData && <AccountsPanel {...accountsData} />}
       {syncData && onSyncMerge && <SyncPanel data={syncData} onMerge={onSyncMerge} />}
+      <FeedbackPanel docs={feedbackDocs ?? accountsData?.docs ?? []} />
 
       <h3>在线内容登录（POPO / KM）</h3>
       <p className="hint">

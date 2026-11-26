@@ -265,3 +265,15 @@ summary { cursor: pointer; font-size: 13px; color: var(--accent); }
 .sys-foot-btns { display: inline-flex; gap: 6px; flex: none; }
 .mini-btn { padding: 4px 10px; font-size: 12px; align-self: center; color: #5b6578; }
 .mini-btn.danger:hover:not(:disabled) { background: #fef2f2; border-color: #fca5a5; color: #dc2626; }
+
+/* 召回反馈（项3b） */
+.fb-btns { display: inline-flex; align-items: center; gap: 4px; flex: none; }
+.fb-btn { padding: 2px 7px; font-size: 12px; border-radius: 6px; align-self: auto; line-height: 1.4; opacity: .75; }
+.fb-btn:hover:not(:disabled) { opacity: 1; }
+.fb-btn.on-up { background: #e7f6ec; border-color: #7bc98f; opacity: 1; }
+.fb-btn.on-down { background: #fdeeee; border-color: #e5a3a3; opacity: 1; }
+.fb-note.up { color: #2e9e52; }
+.fb-note.down { color: #c04545; }
+.fb-panel-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.fb-panel-list li { display: flex; align-items: center; gap: 8px; }
+.fb-panel-list .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

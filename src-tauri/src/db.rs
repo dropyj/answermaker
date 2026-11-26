@@ -89,6 +89,18 @@ CREATE TABLE IF NOT EXISTS vault_attachments (
   data TEXT NOT NULL,
   created_at INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS retrieval_feedback (
+  id TEXT PRIMARY KEY,
+  query TEXT NOT NULL,
+  chunk_id TEXT NOT NULL,
+  doc_id TEXT NOT NULL,
+  signal REAL NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'explicit',
+  bm25_score REAL,
+  vec_score REAL,
+  created_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_chunk ON retrieval_feedback(chunk_id);
 "#;
 
 pub struct DbState(pub Mutex<Connection>);
@@ -113,6 +125,7 @@ pub struct DbSnapshot {
     pub events: Vec<Value>,
     pub accounts: Vec<Value>,
     pub attachments: Vec<Value>,
+    pub feedback: Vec<Value>,
     pub migrated: bool,
 }
 
@@ -235,6 +248,85 @@ fn load_vault(conn: &Connection) -> Result<VaultSnapshot, String> {
     Ok(VaultSnapshot { meta, items })
 }
 
+/// 召回反馈（项3b）：列式存储，字段与前端 RetrievalFeedback 一一对应。
+fn load_feedback(conn: &Connection) -> Result<Vec<Value>, String> {
+    let mut out = Vec::new();
+    let mut st = conn
+        .prepare(
+            "SELECT id, query, chunk_id, doc_id, signal, kind, bm25_score, vec_score, created_at \
+             FROM retrieval_feedback ORDER BY created_at, rowid",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = st
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, f64>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, Option<f64>>(6)?,
+                r.get::<_, Option<f64>>(7)?,
+                r.get::<_, i64>(8)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    for row in rows {
+        let (id, query, chunk_id, doc_id, signal, kind, bm25, vec, created) =
+            row.map_err(|e| e.to_string())?;
+        out.push(serde_json::json!({
+            "id": id,
+            "query": query,
+            "chunkId": chunk_id,
+            "docId": doc_id,
+            "signal": signal,
+            "kind": kind,
+            "bm25Score": bm25,
+            "vecScore": vec,
+            "createdAt": created,
+        }));
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+pub fn db_save_feedback(
+    state: tauri::State<'_, DbState>,
+    items: Vec<Value>,
+) -> Result<(), String> {
+    let mut conn = lock(&state)?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM retrieval_feedback", [])
+        .map_err(|e| e.to_string())?;
+    {
+        let mut st = tx
+            .prepare(
+                "INSERT INTO retrieval_feedback(id, query, chunk_id, doc_id, signal, kind, bm25_score, vec_score, created_at) \
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            )
+            .map_err(|e| e.to_string())?;
+        for item in &items {
+            let id = item["id"]
+                .as_str()
+                .ok_or_else(|| "反馈条目缺少 id".to_string())?;
+            st.execute(params![
+                id,
+                item["query"].as_str().unwrap_or(""),
+                item["chunkId"].as_str().unwrap_or(""),
+                item["docId"].as_str().unwrap_or(""),
+                item["signal"].as_f64().unwrap_or(0.0),
+                item["kind"].as_str().unwrap_or("explicit"),
+                item["bm25Score"].as_f64(),
+                item["vecScore"].as_f64(),
+                item["createdAt"].as_i64().unwrap_or(0),
+            ])
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn db_load_all(state: tauri::State<'_, DbState>) -> Result<DbSnapshot, String> {
     let conn = lock(&state)?;
@@ -294,6 +386,7 @@ pub fn db_load_all(state: tauri::State<'_, DbState>) -> Result<DbSnapshot, Strin
         events: load_table(&conn, "events")?,
         accounts: load_table(&conn, "accounts")?,
         attachments: load_table(&conn, "vault_attachments")?,
+        feedback: load_feedback(&conn)?,
         docs,
         files,
         chunks,

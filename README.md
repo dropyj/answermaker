@@ -168,8 +168,17 @@ MCP 服务端实现 JSON-RPC：`initialize`、`ping`、`tools/list`、`tools/cal
 ```bash
 npm run mcp:smoke                 # 临时端口启动服务，检查鉴权/CORS/工具/批量/参数校验
 SMOKE_POPO=1 npm run mcp:smoke    # 额外测试 POPO 团队空间与目录
+npm run feedback:check            # 召回反馈闭环自查（基线→👍升权→👎降权→撤销恢复）
 ANSWERMAKER_MCP_DEBUG=1 npm run mcp:start   # 输出请求、工具参数与耗时
 ```
+
+### 召回反馈闭环（本地）
+
+检索结果片段上的 👍/👎 与「展开/打开来源」行为会被记下来（SQLite `retrieval_feedback`），
+并调整**相似查询**的排序：最终分 = 基础分 ×（1 + 15% × 加权反馈分），调整封顶 ±15%，
+被踩多的片段只降权不删除，不相似的查询不受影响。结果卡片会标注「因你的反馈加权/降权」；
+设置页有「召回反馈」体检面板（统计、最近记录可删、受影响文档 Top5、导出 JSON、一键清空）。
+公式与常数见 `docs/architecture-and-todo.md` §4.3。
 
 环境变量：
 

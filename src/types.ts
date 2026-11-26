@@ -60,7 +60,31 @@ export interface SearchHit {
   docName: string;
   chunkIndex: number;
   text: string;
+  /** 最终排序分（基础分 + 反馈调整）；基础分见 bm25Score / vecScore。 */
   score: number;
+  /** BM25 基础分（反馈闭环接入后保留原值，便于展示与排查）。 */
+  bm25Score?: number;
+  /** 向量通道基础分（项3 向量检索开启时才有；未开启为 undefined）。 */
+  vecScore?: number;
+  /** 召回反馈调整量（已计入 score）；0/undefined 表示未受反馈影响。 */
+  fbAdj?: number;
+  /** 反馈方向标注：up=因你的反馈加权，down=因你的反馈降权。 */
+  fbDir?: "up" | "down";
+}
+
+/** 召回反馈（项3b）：用户对检索结果的显式 👍/👎 与打开行为弱信号，存 SQLite retrieval_feedback。 */
+export interface RetrievalFeedback {
+  id: string;
+  query: string;
+  /** 片段唯一键：`${docId}#${chunkIndex}` */
+  chunkId: string;
+  docId: string;
+  /** 显式反馈 +1/-1；打开弱信号固定 +0.3（kind=open）。 */
+  signal: number;
+  kind: "explicit" | "open";
+  bm25Score: number | null;
+  vecScore: number | null;
+  createdAt: number;
 }
 
 /** 文件管理归档条目：知识库录入的文件或在线链接。 */

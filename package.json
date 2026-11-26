@@ -25,7 +25,8 @@
     "mcp:start": "node server/mcp-server.mjs",
     "mcp:smoke": "node scripts/mcp-smoke.mjs",
     "sync:check": "node scripts/sync-server-check.mjs",
-    "cli": "node cli/answermaker.mjs"
+    "cli": "node cli/answermaker.mjs",
+    "feedback:check": "node scripts/feedback-check.mjs"
   },
   "type": "module",
   "version": "0.2.0",

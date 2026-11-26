@@ -65,7 +65,7 @@ AnswerMaker 是本地 AI 中枢桌面应用：加密保险库 + RAG 知识库 + 
 - **桌面**：Tauri 2、Rust（edition 2021）、tauri-plugin-dialog
 - **数据库**：SQLite（rusqlite bundled，WAL）
 - **加密**：WebCrypto PBKDF2-SHA256（210,000 次）+ AES-256-GCM（每条目独立 IV）
-- **检索**：本地 BM25（中文单字 + 双字 bigram；英文/数字按词）；k1=1.5、b=0.75
+- **检索**：本地 BM25（中文单字 + 双字 bigram；英文/数字按词）；k1=1.5、b=0.75；其上有本地召回反馈闭环（项3b，±15% 封顶调整，见 §4.3）
 - **MCP**：Node 标准库实现 Streamable HTTP JSON-RPC 子集（initialize / ping / tools/list / tools/call），Bearer Token
 - **CLI**：Node 标准库，入口 `cli/answermaker.mjs`（`am` / `answermaker`）
 - **本地模型**：Ollama HTTP API（非流式）
@@ -81,6 +81,7 @@ src/
 ├─ db.ts                   SQLite 仓储 + localStorage 首次迁移 + 浏览器回退
 ├─ crypto.ts               保险库 WebCrypto；密文入 SQLite；会话密钥仅内存
 ├─ search.ts               切块（512/80）+ 切块内存缓存 + BM25
+├─ feedback.ts             召回反馈（项3b）：采集存储、查询相似度、±15% 封顶调整
 ├─ mcpSync.ts              应用数据 → server/data 自动同步（供 MCP/CLI）
 ├─ files.ts                文件归档去重、名称/地址检索
 ├─ bridge.ts               Tauri 命令封装与浏览器降级
@@ -141,6 +142,7 @@ docs/                      本文档等
 | `notes` / `todos` / `events` | id, data(JSON), created_at | 速记 / 待办 / 日程（WF2） |
 | `vault_attachments` | id, data(JSON), created_at | 保险库加密附件密文（WF3，每条目一个，≤5MB） |
 | `accounts` | id, data(JSON), created_at | 授权账号（WF5：personal-cloud / doc-source / popo 隔离） |
+| `retrieval_feedback` | id, query, chunk_id, doc_id, signal, kind, bm25_score, vec_score, created_at | 召回反馈（项3b，列式存储；见 §4.3） |
 | `meta` | key, value | 迁移标记 `migrated_from_localstorage=1` |
 
 启动流程：
@@ -149,6 +151,34 @@ docs/                      本文档等
 2. 若未迁移且 localStorage 有旧数据 → 逐项导入 → 写入迁移标记（localStorage 原键保留备份）
 3. 切块注入 `search.ts` 内存；保险库注入 `crypto.ts` 内存
 4. 渲染 UI；文档/文件变化写回 SQLite（去抖由 React 状态驱动），同时自动同步 `server/data`
+
+### 4.3 召回反馈闭环（项3b）
+
+纯本地反馈回路，不依赖任何外部资源；实现在 `src/feedback.ts`，排序钩子在 `src/search.ts` 的 `bm25Search` 最终排序前，项3 向量通道开启后基础分换成 hybrid 分即可、反馈层不变。
+
+**采集点**
+
+- 聊天/仅搜索/RAG 的结果片段卡片（`App.tsx` HitCard）上 👍/👎：显式反馈，signal ±1；同 (query, chunkId) 再次点击同向撤销、反向覆盖，只保留最新一条。
+- 展开片段或打开来源：弱正反馈 kind=`open`、signal +0.3（同 query+chunk 只留一条；已有显式反馈时不记，避免叠加）。
+- 反馈发生时的 bm25Score / vecScore 一并落库（vecScore 在向量通道未开启时为 null），供排查。
+
+**排序公式**
+
+```
+finalScore = baseScore + baseScore * 0.15 * clamp(raw, -1, 1)
+raw = Σ_{该 chunk 的历史反馈, sim >= 0.3} sim(query, fb.query) * fb.signal * (kind=explicit ? 1 : 0.5)
+sim = token 集合 Jaccard（复用 BM25 的 tokenize，含中文 bigram；相同 query 时 sim=1）
+```
+
+**封顶与防误杀**
+
+- 调整封顶 ±15%（MAX_ADJ_RATIO=0.15）：反馈只能微调名次，不能把不相关片段顶上来，也不能把相关片段压没。
+- 累计 raw ≤ -0.6（DEMOTE_LINE）视为「降权」而非删除：命中仍会出现，只是排序靠后；结果卡片标注「因你的反馈加权/降权」（标注阈值 |raw| ≥ 0.2）。
+- 查询相似度阈值 SIM_THRESHOLD=0.3：与当前查询不相似的历史反馈不参与，避免反馈污染无关查询。
+
+**体检面板**：设置页「召回反馈」——总数与 👍/👎/打开分布、最近 10 条（可单条删除）、受影响文档 Top5（按净加权绝对值）、导出反馈 JSON、一键清空。清空/删除后排序即时恢复无反馈状态。
+
+**自查**：`npm run feedback:check`（scripts/feedback-check.mjs，esbuild 打包真实 search/feedback 模块）：基线 → 👍 后相似查询分数与排名上升且调整 ≤15% → 👎 后分数下降但不消失 → 撤销恢复基线 → 无关查询不受影响。
 
 ### 4.2 localStorage
 
