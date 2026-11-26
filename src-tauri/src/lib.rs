@@ -170,6 +170,17 @@ fn write_text_file(path: String, contents: String) -> Result<(), String> {
     std::fs::write(&path, contents).map_err(|e| e.to_string())
 }
 
+/// Read a binary file (e.g. PDF for knowledge ingest) as base64, capped at 20 MB.
+#[tauri::command]
+fn read_binary_file_base64(path: String) -> Result<String, String> {
+    use base64::Engine;
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    if bytes.len() > 20 * 1024 * 1024 {
+        return Err("文件超过 20MB 上限".into());
+    }
+    Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
+}
+
 #[tauri::command]
 fn read_text_file(path: String) -> Result<String, String> {
     let meta = std::fs::metadata(&path).map_err(|e| format!("无法读取文件：{e}"))?;
@@ -314,6 +325,7 @@ pub fn run() {
             mcp::mcp_audit_tail,
             chat_send,
             read_text_file,
+            read_binary_file_base64,
             write_text_file,
             open_url,
             open_path,

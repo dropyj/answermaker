@@ -6,6 +6,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { call, isTauri } from "../bridge";
 import type { FileEntry, KnowledgeDoc, LinkReadResult, Project, ProjectLink } from "../types";
 import ProjectPicker from "./ProjectPicker";
+import { extractPdfText } from "../pdf";
 import { uid } from "../types";
 import { chunkText, deleteChunks, getChunks, saveChunks } from "../search";
 import { removeFilesByDoc, upsertFile } from "../files";
@@ -76,31 +77,61 @@ export default function Knowledge({ docs, setDocs, files, setFiles, projects = [
     setNotice(`「${name}」已登记元数据（未切块）。`);
   };
 
-  const ingestText = (name: string, raw: string, origin: string, size?: number) => {
-    const ext = extOf(name);
-    if (!TEXT_EXTS.includes(ext)) {
-      registerOnly(name, origin, size, "暂不支持解析（PDF/Word 等二进制格式将在后续版本支持），已登记元数据，未切块");
-      return;
-    }
-    const text = ext === "html" || ext === "htm" ? stripHtml(raw) : raw;
+  const doIngest = (name: string, text: string, origin: string, size: number | undefined, statusNote: string) => {
     const chunks = chunkText(text);
     const doc: KnowledgeDoc = {
       id: uid(), name, source: "本地文件", chunks: 0, stage: "解析", status: "indexed",
-      syncStatus: "本地 BM25 索引就绪", size, origin, importedAt: Date.now(),
+      syncStatus: statusNote, size, origin, importedAt: Date.now(),
     };
     saveChunks(doc.id, chunks);
     setDocs((prev) => [doc, ...prev]);
     archive({ name, kind: "file", source: origin, docId: doc.id, importedAt: doc.importedAt ?? Date.now(), size, status: "indexed" });
     animateStages(doc.id, chunks.length);
-    setNotice(`「${name}」已真实读取并切块：${chunks.length} 块（约 512 字符/块，重叠 80）。`);
+    setNotice(`「${name}」${statusNote}：${chunks.length} 块（约 512 字符/块，重叠 80）。`);
+  };
+
+  const ingestText = (name: string, raw: string, origin: string, size?: number) => {
+    const ext = extOf(name);
+    if (!TEXT_EXTS.includes(ext)) {
+      registerOnly(name, origin, size, "暂不支持解析（Word 等格式将在后续版本支持），已登记元数据，未切块");
+      return;
+    }
+    const text = ext === "html" || ext === "htm" ? stripHtml(raw) : raw;
+    doIngest(name, text, origin, size, "本地 BM25 索引就绪");
+  };
+
+  /** PDF：逐页抽取文本层真实入库；抽不到文本（多为扫描件）只登记元数据并如实提示。 */
+  const ingestPdf = async (name: string, data: ArrayBuffer, origin: string, size?: number) => {
+    try {
+      const { text, pages } = await extractPdfText(data);
+      if (text.replace(/\s/g, "").length < 20) {
+        registerOnly(name, origin, size, "未抽到文本（可能是扫描件），已登记元数据");
+        return;
+      }
+      doIngest(name, text, origin, size, `已入库（PDF 解析，${pages} 页）`);
+    } catch (e) {
+      registerOnly(name, origin, size, `PDF 解析失败（${e instanceof Error ? e.message : String(e)}），已登记元数据`);
+    }
   };
 
   /** 桌面端：按绝对路径读取文本（拖拽或原生文件选择器），保留原始地址用于溯源。 */
   const ingestPath = async (path: string) => {
     const name = basename(path);
     const ext = extOf(name);
+    if (ext === "pdf") {
+      try {
+        const b64 = await call<string>("read_binary_file_base64", { path });
+        const bin = atob(b64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        await ingestPdf(name, bytes.buffer as ArrayBuffer, path, bytes.length);
+      } catch (e) {
+        registerOnly(name, path, undefined, `PDF 读取失败（${e instanceof Error ? e.message : String(e)}），已登记元数据`);
+      }
+      return;
+    }
     if (!TEXT_EXTS.includes(ext)) {
-      registerOnly(name, path, undefined, "暂不支持解析（PDF/Word 等二进制格式将在后续版本支持），已登记原始路径，未切块");
+      registerOnly(name, path, undefined, "暂不支持解析（Word 等格式将在后续版本支持），已登记原始路径，未切块");
       return;
     }
     try {
@@ -114,8 +145,12 @@ export default function Knowledge({ docs, setDocs, files, setFiles, projects = [
   // 浏览器预览：HTML5 文件输入 / 拖拽（只能拿到文件名）
   const ingestBrowserFile = async (file: File) => {
     const ext = extOf(file.name);
+    if (ext === "pdf") {
+      await ingestPdf(file.name, await file.arrayBuffer(), file.name, file.size);
+      return;
+    }
     if (!TEXT_EXTS.includes(ext)) {
-      registerOnly(file.name, file.name, file.size, "暂不支持解析（PDF/Word 等二进制格式将在后续版本支持），已登记元数据，未切块");
+      registerOnly(file.name, file.name, file.size, "暂不支持解析（Word 等格式将在后续版本支持），已登记元数据，未切块");
       return;
     }
     const raw = await file.text();
@@ -284,7 +319,7 @@ export default function Knowledge({ docs, setDocs, files, setFiles, projects = [
   return (
     <div className="panel">
       <h2>知识库 Knowledge</h2>
-      <p className="hint">支持 .txt / .md / .csv / .json / .html 文件与 KM/POPO 链接；PDF/Word 等仅登记。文件与链接会归档到「文件管理」。</p>
+      <p className="hint">支持 .txt / .md / .csv / .json / .html 与 .pdf（逐页抽取文本层真实入库；扫描版 PDF 无文本层时仅登记并提示）文件与 KM/POPO 链接；Word(.docx) 等仅登记。文件与链接会归档到「文件管理」。</p>
       <div className="dropzone" onDragOver={(e) => e.preventDefault()} onDrop={onDrop}>
         拖拽文件到这里自动入库
       </div>
