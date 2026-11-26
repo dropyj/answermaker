@@ -246,11 +246,17 @@ export default function SyncPanel({ data, onMerge }: {
           <>
             <input placeholder="服务器端点 URL（默认 https://heytiger.cn/amsync，可改自建端点）" value={settings.serverEndpoint} onChange={(e) => save({ ...settings, serverEndpoint: e.target.value })} />
             {loggedIn ? (
-              <p className="dim">
-                已登录账号：<strong>{settings.accountEmail || authEmail}</strong>
-                {settings.sessionExpiresAt > 0 && <> · 会话到期：{new Date(settings.sessionExpiresAt).toLocaleString()}</>}
-                {" "}<button disabled={authBusy} onClick={() => void doLogout()}>退出登录</button>
-              </p>
+              <div className="account-card">
+                <div className="account-avatar">{(settings.accountEmail || authEmail || "?").trim().charAt(0).toUpperCase()}</div>
+                <div className="account-meta">
+                  <div className="account-email"><span className="status-dot" />{settings.accountEmail || authEmail}</div>
+                  <div className="account-sub">
+                    已登录 · 同步包按账号隔离存储
+                    {settings.sessionExpiresAt > 0 && <> · 会话到期 {new Date(settings.sessionExpiresAt).toLocaleString()}</>}
+                  </div>
+                </div>
+                <button className="logout-btn" disabled={authBusy} onClick={() => void doLogout()}>退出登录</button>
+              </div>
             ) : (
               <>
                 <select value={authMode} onChange={(e) => setAuthMode(e.target.value as "login" | "register")}>
@@ -267,11 +273,11 @@ export default function SyncPanel({ data, onMerge }: {
                 </div>
               </>
             )}
-            <details>
+            <details className="span-all">
               <summary className="dim">高级：手动 Token（兼容旧设备 Token，可不填）</summary>
               <input type="password" placeholder="设备 Token（Bearer，只存本机；已登录账号时优先用会话 Token）" value={settings.serverToken} onChange={(e) => save({ ...settings, serverToken: e.target.value })} />
             </details>
-            <p className="hint">
+            <p className="hint span-all">
               服务器只保存 .amsync 密文包与版本元信息，保持零知识；同步包按<strong>登录账号隔离存储</strong>，不同账号互不可见。
               默认端点为官方服务（HTTPS）；也可改成自建端点。账号密码不落盘，只保存会话 Token 于本机浏览器存储，不进同步包。
             </p>
