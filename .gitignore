@@ -1,0 +1,11 @@
+node_modules/
+dist/
+src-tauri/target/
+.DS_Store
+
+# MCP runtime data: tokens, secret request queues, snapshots, logs — never commit
+server/data/
+mcp-token.txt
+*.log
+*.db
+.env

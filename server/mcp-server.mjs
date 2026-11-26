@@ -1,0 +1,767 @@
+#!/usr/bin/env node
+// AnswerMaker MCP 服务端（Node 标准库实现，无第三方依赖）
+// MCP Streamable HTTP 最小可用子集：initialize / ping / tools/list / tools/call
+// 鉴权：Authorization: Bearer <Token>；Token 取环境变量 ANSWERMAKER_MCP_TOKEN，
+// 否则读取/生成 server/data/mcp-token.txt（首次生成后复用）。
+// 调试：ANSWERMAKER_MCP_DEBUG=1 输出请求、工具参数与耗时。
+// 数据：server/data/knowledge.json（文档 + 文件归档）、vault-refs.json（仅引用与元数据）。
+// POPO：link_read / popo_spaces / popo_list 经 popo-cli（OpenID 登录）读取。
+
+import http from "node:http";
+import { randomBytes } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { readLink, listTeamSpaces, listFolder, popoAvailable } from "./popo-lib.mjs";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const DATA_DIR = process.env.ANSWERMAKER_DATA_DIR || join(here, "data");
+const TOKEN_FILE = process.env.ANSWERMAKER_MCP_TOKEN_FILE || join(DATA_DIR, "mcp-token.txt");
+const RUNTIME_FILE = process.env.ANSWERMAKER_MCP_RUNTIME_FILE || join(DATA_DIR, "mcp-runtime.json");
+const SECRET_REQUEST_DIR = join(DATA_DIR, "secret-requests");
+const SECRET_RESPONSE_DIR = join(DATA_DIR, "secret-responses");
+const SECRET_TEMP_DIR = join(tmpdir(), "answermaker-secrets");
+const basePortRaw = Number(process.env.ANSWERMAKER_MCP_PORT ?? 7361);
+const BASE_PORT = Number.isFinite(basePortRaw) ? basePortRaw : 7361;
+const DEBUG = /^(1|true)$/i.test(process.env.ANSWERMAKER_MCP_DEBUG || "");
+const PROTOCOL_VERSION = "2024-11-05";
+const VERSION = "0.2.0";
+const MAX_BODY = 1_000_000;
+const startedAt = Date.now();
+
+function safeJson(v) {
+  try { return JSON.stringify(v); } catch { return ""; }
+}
+
+function log(level, message, extra) {
+  if (level === "debug" && !DEBUG) return;
+  const line = `[${new Date().toISOString()}] [${level.toUpperCase()}] ${message}${extra !== undefined ? " " + safeJson(extra) : ""}`;
+  if (level === "error") console.error(line); else console.log(line);
+}
+
+try { mkdirSync(DATA_DIR, { recursive: true }); } catch { /* ignore */ }
+
+function loadJson(name, fallback) {
+  try { return JSON.parse(readFileSync(join(DATA_DIR, name), "utf8")); } catch { return fallback; }
+}
+const loadKnowledge = () => loadJson("knowledge.json", { docs: [] });
+const loadFiles = () => {
+  const k = loadKnowledge();
+  if (Array.isArray(k.files)) return k.files;
+  const f = loadJson("files.json", { files: [] });
+  return Array.isArray(f.files) ? f.files : [];
+};
+const loadVaultRefs = () => loadJson("vault-refs.json", { refs: [] });
+
+function resolveToken() {
+  if (process.env.ANSWERMAKER_MCP_TOKEN) {
+    return { token: process.env.ANSWERMAKER_MCP_TOKEN, source: "env" };
+  }
+  try {
+    const existing = readFileSync(TOKEN_FILE, "utf8").trim();
+    if (existing) return { token: existing, source: "file" };
+  } catch { /* generate */ }
+  const token = "am_" + randomBytes(24).toString("hex");
+  try {
+    writeFileSync(TOKEN_FILE, token + "\n", { encoding: "utf8", mode: 0o600 });
+  } catch (e) {
+    log("warn", "无法写入 token 文件", { message: e.message });
+  }
+  return { token, source: "generated" };
+}
+
+const { token: TOKEN, source: TOKEN_SOURCE } = resolveToken();
+let actualPort = BASE_PORT;
+
+function writeRuntime(port) {
+  try {
+    writeFileSync(RUNTIME_FILE, JSON.stringify({
+      name: "answermaker-mcp",
+      version: VERSION,
+      port,
+      pid: process.pid,
+      startedAt: new Date(startedAt).toISOString(),
+      tokenFile: TOKEN_FILE,
+    }, null, 2));
+  } catch (e) {
+    log("warn", "无法写入 runtime 文件", { message: e.message });
+  }
+}
+
+function tokenize(text) {
+  const tokens = [];
+  const lower = String(text).toLowerCase();
+  for (const w of lower.match(/[a-z0-9_]+/g) ?? []) tokens.push(w);
+  for (const seg of lower.match(/[一-鿿]+/g) ?? []) {
+    for (let i = 0; i < seg.length; i++) { tokens.push(seg[i]); if (i + 1 < seg.length) tokens.push(seg.slice(i, i + 2)); }
+  }
+  return tokens;
+}
+
+function invalid(message) {
+  return Object.assign(new Error(message), { code: -32602 });
+}
+function clampLimit(value, fallback = 5) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(1, Math.min(50, Math.trunc(n)));
+}
+function requireString(args, key) {
+  const v = args?.[key];
+  if (typeof v !== "string" || !v.trim()) throw invalid(`缺少参数 ${key}`);
+  return v.trim();
+}
+
+/** 与前端 src/search.ts 的 BM25 完全一致：同样的分词、k1/b、IDF 与长度归一。 */
+function bm25Search(query, docs, limit = 5) {
+  const qTokens = [...new Set(tokenize(query))];
+  if (qTokens.length === 0) return [];
+  const items = [];
+  for (const doc of docs) {
+    (doc.chunks ?? []).forEach((text, chunkIndex) => {
+      items.push({
+        doc: doc.name,
+        docId: doc.id,
+        origin: doc.origin ?? "",
+        chunkIndex,
+        text,
+        tokens: tokenize(text),
+      });
+    });
+  }
+  if (items.length === 0) return [];
+
+  const avgLen = items.reduce((s, d) => s + d.tokens.length, 0) / items.length || 1;
+  const df = new Map(qTokens.map((t) => [t, items.filter((d) => d.tokens.includes(t)).length]));
+  const k1 = 1.5, b = 0.75, N = items.length;
+  const hits = [];
+  for (const d of items) {
+    const tf = new Map();
+    for (const t of d.tokens) tf.set(t, (tf.get(t) ?? 0) + 1);
+    let score = 0;
+    for (const t of qTokens) {
+      const f = tf.get(t) ?? 0;
+      if (!f) continue;
+      const dfi = df.get(t) ?? 0;
+      const idf = Math.log(1 + (N - dfi + 0.5) / (dfi + 0.5));
+      score += idf * ((f * (k1 + 1)) / (f + k1 * (1 - b + (b * d.tokens.length) / avgLen)));
+    }
+    if (score > 0) {
+      hits.push({ doc: d.doc, docId: d.docId, origin: d.origin, chunkIndex: d.chunkIndex, score, text: d.text });
+    }
+  }
+  return hits.sort((a, b2) => b2.score - a.score).slice(0, limit);
+}
+
+function knowledgeSearch(query, limit = 5) {
+  return bm25Search(query, loadKnowledge().docs ?? [], limit);
+}
+
+function fileSearch(query, limit = 5) {
+  const q = [...new Set(tokenize(query))];
+  if (q.length === 0) return [];
+  return loadFiles()
+    .map((f) => {
+      const name = String(f.name ?? "").toLowerCase();
+      const source = String(f.source ?? "").toLowerCase();
+      let score = 0;
+      for (const t of q) {
+        if (name.includes(t)) score += 3;
+        else if (source.includes(t)) score += 1;
+      }
+      return { f, score };
+    })
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map((x) => x.f);
+}
+
+function vaultSearch(query, limit = 5) {
+  const q = [...new Set(tokenize(query))];
+  if (q.length === 0) return [];
+  return (loadVaultRefs().refs ?? [])
+    .map((r) => {
+      const key = String(r.key ?? "").toLowerCase();
+      const type = String(r.type ?? "").toLowerCase();
+      const url = String(r.url ?? "").toLowerCase();
+      let score = 0;
+      for (const t of q) {
+        if (key.includes(t)) score += 2;
+        else if (type.includes(t)) score += 1;
+        else if (url.includes(t)) score += 1;
+      }
+      return { r, score };
+    })
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map((x) => x.r);
+}
+
+// ---------- vault secret requests (short-lived temp file, never plaintext in RPC) ----------
+
+const SECRET_ID_RE = /^sec_[0-9a-f]{12,32}$/;
+const nowMs = () => Date.now();
+
+function ensureSecretDirs() {
+  for (const d of [SECRET_REQUEST_DIR, SECRET_RESPONSE_DIR, SECRET_TEMP_DIR]) {
+    try { mkdirSync(d, { recursive: true }); } catch { /* ignore */ }
+  }
+}
+
+function readJsonFile(path) {
+  try { return JSON.parse(readFileSync(path, "utf8")); } catch { return null; }
+}
+
+function writeJsonFile(path, obj) {
+  writeFileSync(path, JSON.stringify(obj, null, 2));
+}
+
+function sweepSecrets() {
+  ensureSecretDirs();
+  const now = nowMs();
+  try {
+    for (const name of readdirSync(SECRET_RESPONSE_DIR)) {
+      if (!name.endsWith(".json")) continue;
+      const p = join(SECRET_RESPONSE_DIR, name);
+      const v = readJsonFile(p);
+      if (!v) { try { unlinkSync(p); } catch { /* ignore */ } continue; }
+      const expires = Number(v.expiresAt) || 0;
+      if (expires && now > expires) {
+        if (typeof v.path === "string" && v.path.startsWith(SECRET_TEMP_DIR)) {
+          try { unlinkSync(v.path); } catch { /* ignore */ }
+        }
+        try { unlinkSync(p); } catch { /* ignore */ }
+      }
+    }
+  } catch { /* ignore */ }
+  try {
+    for (const name of readdirSync(SECRET_REQUEST_DIR)) {
+      if (!name.endsWith(".json")) continue;
+      const p = join(SECRET_REQUEST_DIR, name);
+      const v = readJsonFile(p);
+      const created = Number(v?.createdAt) || 0;
+      const answered = existsSync(join(SECRET_RESPONSE_DIR, name));
+      if (created && now - created > 10 * 60 * 1000 && !answered) {
+        try { unlinkSync(p); } catch { /* ignore */ }
+      }
+    }
+  } catch { /* ignore */ }
+}
+
+function resolveVaultRef(args) {
+  const id = typeof args?.id === "string" ? args.id.trim() : "";
+  const ref = typeof args?.ref === "string" ? args.ref.trim() : "";
+  if (!id && !ref) throw invalid("id 或 ref 至少提供一个");
+  const refs = loadVaultRefs().refs ?? [];
+  const found = id ? refs.find((r) => r.id === id) : refs.find((r) => r.ref === ref);
+  if (!found) throw invalid("未找到该保险库引用；请先用 vault_search / vault_list_refs 查询");
+  return found;
+}
+
+function secretResult(id, res, request) {
+  if (res.status === "ready") {
+    if (!res.path || !existsSync(res.path)) {
+      return { status: "expired", requestId: id, message: "临时文件已过期或被删除，请重新发起 vault_get_secret" };
+    }
+    return {
+      status: "ready",
+      requestId: id,
+      path: res.path,
+      ref: res.ref ?? request.ref ?? "",
+      key: request.key ?? "",
+      type: request.type ?? "",
+      ttlSec: res.ttlSec,
+      expiresAt: res.expiresAt,
+      message: "临时文件为条目明文 JSON（key/type/account/value/url）。请立即使用，勿写入日志或提交仓库；用后调用 vault_secret_release。",
+    };
+  }
+  return { status: res.status ?? "error", requestId: id, message: res.message ?? "" };
+}
+
+async function vaultGetSecret(args) {
+  ensureSecretDirs();
+  sweepSecrets();
+  const found = resolveVaultRef(args);
+  const purpose = typeof args?.purpose === "string" ? args.purpose.slice(0, 200) : "";
+  const ttlRaw = Number(args?.ttlSec);
+  const ttlSec = Number.isFinite(ttlRaw) ? Math.max(15, Math.min(300, Math.trunc(ttlRaw))) : 60;
+  const waitRaw = Number(args?.waitMs);
+  const waitMs = Number.isFinite(waitRaw) ? Math.max(0, Math.min(15000, Math.trunc(waitRaw))) : 10000;
+  const id = "sec_" + randomBytes(12).toString("hex");
+  const request = {
+    id,
+    vaultId: found.id ?? "",
+    key: found.key ?? "",
+    type: found.type ?? "",
+    ref: found.ref ?? "",
+    purpose,
+    ttlSec,
+    createdAt: nowMs(),
+  };
+  writeJsonFile(join(SECRET_REQUEST_DIR, id + ".json"), request);
+
+  const deadline = nowMs() + waitMs;
+  while (nowMs() <= deadline) {
+    const res = readJsonFile(join(SECRET_RESPONSE_DIR, id + ".json"));
+    if (res) return secretResult(id, res, request);
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  return {
+    status: "pending",
+    requestId: id,
+    ref: request.ref,
+    key: request.key,
+    type: request.type,
+    ttlSec,
+    message: "等待 AnswerMaker 授权：请打开应用，在「保险库 → MCP 密钥请求」中允许；随后用 vault_secret_status 查询。",
+  };
+}
+
+function vaultSecretStatus(args) {
+  const id = requireString(args, "requestId");
+  if (!SECRET_ID_RE.test(id)) throw invalid("requestId 格式非法");
+  ensureSecretDirs();
+  sweepSecrets();
+  const res = readJsonFile(join(SECRET_RESPONSE_DIR, id + ".json"));
+  if (res) {
+    const request = readJsonFile(join(SECRET_REQUEST_DIR, id + ".json")) ?? {};
+    return secretResult(id, res, request);
+  }
+  const request = readJsonFile(join(SECRET_REQUEST_DIR, id + ".json"));
+  if (request) {
+    return {
+      status: "pending",
+      requestId: id,
+      ref: request.ref,
+      key: request.key,
+      type: request.type,
+      ttlSec: request.ttlSec,
+      createdAt: request.createdAt,
+      message: "等待用户在 AnswerMaker 中授权",
+    };
+  }
+  return { status: "unknown", requestId: id, message: "请求不存在或已过期" };
+}
+
+function vaultSecretRelease(args) {
+  const id = requireString(args, "requestId");
+  if (!SECRET_ID_RE.test(id)) throw invalid("requestId 格式非法");
+  ensureSecretDirs();
+  const res = readJsonFile(join(SECRET_RESPONSE_DIR, id + ".json"));
+  let removedFile = false;
+  if (typeof res?.path === "string" && res.path.startsWith(SECRET_TEMP_DIR) && existsSync(res.path)) {
+    try { unlinkSync(res.path); removedFile = true; } catch { /* ignore */ }
+  }
+  for (const p of [join(SECRET_RESPONSE_DIR, id + ".json"), join(SECRET_REQUEST_DIR, id + ".json")]) {
+    try { unlinkSync(p); } catch { /* ignore */ }
+  }
+  return { status: "released", requestId: id, removedFile };
+}
+
+function knowledgeGetDoc(args) {
+  const { docs } = loadKnowledge();
+  const docId = typeof args?.docId === "string" ? args.docId.trim() : "";
+  const name = typeof args?.name === "string" ? args.name.trim() : "";
+  if (!docId && !name) throw invalid("docId 或 name 至少提供一个");
+  const doc = docId
+    ? docs.find((d) => String(d.id) === docId)
+    : docs.find((d) => String(d.name ?? "").includes(name));
+  if (!doc) throw invalid("未找到该知识库文档");
+  return {
+    id: doc.id,
+    name: doc.name,
+    source: doc.source,
+    origin: doc.origin ?? "",
+    importedAt: doc.importedAt ?? 0,
+    chunks: doc.chunks ?? [],
+  };
+}
+
+function serverStatus() {
+  const { docs } = loadKnowledge();
+  return {
+    name: "answermaker",
+    version: VERSION,
+    protocolVersion: PROTOCOL_VERSION,
+    port: actualPort,
+    pid: process.pid,
+    uptimeSec: Math.round((Date.now() - startedAt) / 1000),
+    node: process.version,
+    platform: process.platform,
+    debug: DEBUG,
+    data: {
+      docs: docs.length,
+      files: loadFiles().length,
+      vaultRefs: (loadVaultRefs().refs ?? []).length,
+    },
+    popo: { available: popoAvailable() },
+  };
+}
+
+const TOOLS = [
+  {
+    name: "server_info",
+    description: "返回服务端名称、版本、协议版本与工具清单。",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "server_status",
+    description: "返回运行状态、数据量与 popo-cli 可用性，便于调试。",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "vault_list_refs",
+    description: "列出保险库条目引用（vault://<key>/<type>）与 key/type/url 元数据，绝不返回明文 value。",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "vault_search",
+    description: "按 key/type/url 检索保险库引用（只含元数据，不含明文）。",
+    inputSchema: { type: "object", properties: { query: { type: "string" }, limit: { type: "number" } }, required: ["query"] },
+  },
+  {
+    name: "vault_get_secret",
+    description:
+      "请求临时使用某个保险库条目：需 AnswerMaker 运行且保险库已解锁，由用户在应用内授权后，返回一个短期有效的本地临时文件路径（协议响应不返回明文）。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "条目 id（推荐，来自 vault_search/vault_list_refs）" },
+        ref: { type: "string", description: "vault://<key>/<type> 引用" },
+        purpose: { type: "string", description: "用途说明，展示给授权用户" },
+        ttlSec: { type: "number", description: "临时文件有效期秒数（15-300，默认 60）" },
+        waitMs: { type: "number", description: "等待授权的最长毫秒数（0-15000，默认 10000）" },
+      },
+    },
+  },
+  {
+    name: "vault_secret_status",
+    description: "查询 vault_get_secret 请求状态；ready 时返回临时文件路径与到期时间，仍不返回明文。",
+    inputSchema: { type: "object", properties: { requestId: { type: "string" } }, required: ["requestId"] },
+  },
+  {
+    name: "vault_secret_release",
+    description: "立即删除临时文件并结束请求（使用完凭据后调用）。",
+    inputSchema: { type: "object", properties: { requestId: { type: "string" } }, required: ["requestId"] },
+  },
+  {
+    name: "knowledge_search",
+    description: "在知识库导出数据中做关键词检索，返回命中片段、文档与来源地址。",
+    inputSchema: { type: "object", properties: { query: { type: "string" }, limit: { type: "number" } }, required: ["query"] },
+  },
+  {
+    name: "knowledge_list",
+    description: "列出知识库文档、来源、导入时间与切块数。",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "knowledge_get_doc",
+    description: "按 docId 或名称读取知识库文档的完整切块与来源。",
+    inputSchema: { type: "object", properties: { docId: { type: "string" }, name: { type: "string" } } },
+  },
+  {
+    name: "search_all",
+    description: "与聊天区一致的统一检索：文件/链接名称 + 保险库引用 + 知识库 BM25（不含明文）。",
+    inputSchema: { type: "object", properties: { query: { type: "string" }, limit: { type: "number" } }, required: ["query"] },
+  },
+  {
+    name: "files_list",
+    description: "列出文件管理归档的文件与链接（名称、类型、源地址、导入时间）。",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "files_search",
+    description: "按名称或源地址检索文件/链接归档。",
+    inputSchema: { type: "object", properties: { query: { type: "string" }, limit: { type: "number" } }, required: ["query"] },
+  },
+  {
+    name: "link_read",
+    description: "经 popo-cli 读取 KM / POPO 文档链接正文（需已登录 popo-cli）。",
+    inputSchema: { type: "object", properties: { url: { type: "string" } }, required: ["url"] },
+  },
+  {
+    name: "popo_spaces",
+    description: "列出当前账号有权限的 POPO 团队空间。",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "popo_list",
+    description: "列出 POPO 个人云空间或团队空间目录；folderId=0 表示根目录，不传 teamSpaceId 表示个人云空间。",
+    inputSchema: { type: "object", properties: { teamSpaceId: { type: "string" }, folderId: { type: "string" } } },
+  },
+];
+
+async function callTool(name, args = {}) {
+  if (typeof name !== "string" || !name) throw invalid("缺少工具名");
+  if (args === null || typeof args !== "object" || Array.isArray(args)) throw invalid("arguments 必须是对象");
+
+  switch (name) {
+    case "server_info":
+      return { name: "answermaker", version: VERSION, protocolVersion: PROTOCOL_VERSION, port: actualPort, tools: TOOLS.map((t) => t.name) };
+    case "server_status":
+      return serverStatus();
+    case "vault_list_refs":
+      return { refs: loadVaultRefs().refs ?? [] };
+    case "vault_search": {
+      const query = requireString(args, "query");
+      return { query, hits: vaultSearch(query, clampLimit(args.limit)) };
+    }
+    case "vault_get_secret":
+      return await vaultGetSecret(args);
+    case "vault_secret_status":
+      return vaultSecretStatus(args);
+    case "vault_secret_release":
+      return vaultSecretRelease(args);
+    case "knowledge_search": {
+      const query = requireString(args, "query");
+      return { query, hits: knowledgeSearch(query, clampLimit(args.limit)) };
+    }
+    case "knowledge_list": {
+      const { docs } = loadKnowledge();
+      return {
+        docs: docs.map((d) => ({
+          id: d.id,
+          name: d.name,
+          source: d.source,
+          origin: d.origin ?? "",
+          importedAt: d.importedAt ?? 0,
+          chunkCount: (d.chunks ?? []).length,
+        })),
+      };
+    }
+    case "knowledge_get_doc":
+      return knowledgeGetDoc(args);
+    case "search_all": {
+      const query = requireString(args, "query");
+      const limit = clampLimit(args.limit);
+      const files = fileSearch(query, limit);
+      const vault = vaultSearch(query, limit);
+      const knowledge = knowledgeSearch(query, limit);
+      return {
+        query,
+        files,
+        vault,
+        knowledge,
+        summary: { files: files.length, vault: vault.length, knowledge: knowledge.length },
+      };
+    }
+    case "files_list":
+      return { files: loadFiles() };
+    case "files_search": {
+      const query = requireString(args, "query");
+      return { query, hits: fileSearch(query, clampLimit(args.limit)) };
+    }
+    case "link_read": {
+      const url = requireString(args, "url");
+      return await readLink(url);
+    }
+    case "popo_spaces":
+      return { spaces: await listTeamSpaces() };
+    case "popo_list": {
+      const teamSpaceId = typeof args.teamSpaceId === "string" ? args.teamSpaceId : "";
+      const folderId = typeof args.folderId === "string" && args.folderId ? args.folderId : "0";
+      return await listFolder(teamSpaceId, folderId);
+    }
+    default:
+      throw Object.assign(new Error(`Unknown tool: ${name}`), { code: -32602 });
+  }
+}
+
+async function handleRpc(msg) {
+  if (!msg || typeof msg !== "object" || Array.isArray(msg)) {
+    return { jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } };
+  }
+  const { id, method, params } = msg;
+  if (msg.jsonrpc !== "2.0" || typeof method !== "string") {
+    return { jsonrpc: "2.0", id: id ?? null, error: { code: -32600, message: "Invalid Request" } };
+  }
+  // 无 id 视为通知，不需要响应
+  if (!Object.prototype.hasOwnProperty.call(msg, "id")) return null;
+  if (method.startsWith("notifications/")) return null;
+
+  switch (method) {
+    case "initialize":
+      return {
+        jsonrpc: "2.0",
+        id,
+        result: {
+          protocolVersion: PROTOCOL_VERSION,
+          capabilities: { tools: {} },
+          serverInfo: { name: "answermaker", version: VERSION },
+        },
+      };
+    case "ping":
+      return { jsonrpc: "2.0", id, result: {} };
+    case "tools/list":
+      return { jsonrpc: "2.0", id, result: { tools: TOOLS } };
+    case "tools/call": {
+      const tool = params?.name;
+      const args = params?.arguments ?? {};
+      if (typeof tool !== "string" || !tool) {
+        return { jsonrpc: "2.0", id, error: { code: -32602, message: "缺少工具名" } };
+      }
+      if (DEBUG) log("debug", "tool_args", { tool, args: safeJson(args).slice(0, 800) });
+      const t0 = Date.now();
+      try {
+        const out = await callTool(tool, args);
+        log("info", "tool_call", { tool, ok: true, ms: Date.now() - t0 });
+        return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(out, null, 2) }] } };
+      } catch (e) {
+        log("error", "tool_call", { tool, ok: false, ms: Date.now() - t0, error: e.message });
+        return { jsonrpc: "2.0", id, error: { code: e.code ?? -32603, message: e.message } };
+      }
+    }
+    default:
+      return { jsonrpc: "2.0", id, error: { code: -32601, message: `Method not found: ${method}` } };
+  }
+}
+
+async function handlePayload(payload) {
+  if (Array.isArray(payload)) {
+    if (payload.length === 0) {
+      return { jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } };
+    }
+    const results = (await Promise.all(payload.map(handleRpc))).filter(Boolean);
+    return results.length ? results : null;
+  }
+  return handleRpc(payload);
+}
+
+function corsHeaders() {
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+    "Access-Control-Allow-Headers": "Authorization, Content-Type, Mcp-Session-Id",
+    "Access-Control-Max-Age": "86400",
+  };
+}
+
+function sendJson(res, status, obj) {
+  res.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
+    ...corsHeaders(),
+  });
+  res.end(JSON.stringify(obj));
+}
+
+const server = http.createServer((req, res) => {
+  const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+
+  if (url.pathname === "/mcp" && req.method === "OPTIONS") {
+    res.writeHead(204, corsHeaders());
+    res.end();
+    return;
+  }
+
+  if (url.pathname === "/health") {
+    return sendJson(res, 200, {
+      ok: true,
+      name: "answermaker-mcp",
+      version: VERSION,
+      port: actualPort,
+      pid: process.pid,
+      uptimeSec: Math.round((Date.now() - startedAt) / 1000),
+    });
+  }
+
+  if (url.pathname !== "/mcp") return sendJson(res, 404, { error: "not_found" });
+  if (req.method !== "POST") {
+    return sendJson(res, 405, { error: "method_not_allowed", message: "Streamable HTTP endpoint accepts POST" });
+  }
+
+  const auth = req.headers.authorization ?? "";
+  if (auth !== `Bearer ${TOKEN}`) {
+    log("warn", "unauthorized", { ip: req.socket.remoteAddress });
+    return sendJson(res, 401, { error: "unauthorized", message: "Missing or invalid API token" });
+  }
+
+  let body = "";
+  let tooLarge = false;
+  req.on("data", (chunk) => {
+    if (tooLarge) return;
+    body += chunk;
+    if (body.length > MAX_BODY) {
+      tooLarge = true;
+      sendJson(res, 413, { jsonrpc: "2.0", id: null, error: { code: -32600, message: "Request body too large" } });
+      req.destroy();
+    }
+  });
+  req.on("end", async () => {
+    if (tooLarge) return;
+    let payload;
+    try {
+      payload = JSON.parse(body);
+    } catch {
+      return sendJson(res, 400, { jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } });
+    }
+    const t0 = Date.now();
+    const isBatch = Array.isArray(payload);
+    const method = isBatch ? `batch(${payload.length})` : payload?.method;
+    const id = isBatch ? undefined : payload?.id;
+    log("debug", "request", { method, id });
+    try {
+      const reply = await handlePayload(payload);
+      log("debug", "response", { method, id, ms: Date.now() - t0 });
+      if (reply === null) {
+        res.writeHead(202, corsHeaders());
+        res.end();
+        return;
+      }
+      sendJson(res, 200, reply);
+    } catch (e) {
+      log("error", "request_failed", { method, id, error: e.message });
+      sendJson(res, 500, { jsonrpc: "2.0", id: id ?? null, error: { code: -32603, message: e.message } });
+    }
+  });
+});
+
+function listenWithFallback(base) {
+  return new Promise((resolve, reject) => {
+    let current = Number.isFinite(base) && base >= 0 ? base : 7361;
+    let attempts = 0;
+    const onError = (err) => {
+      if (err.code === "EADDRINUSE" && current > 0 && attempts < 20) {
+        attempts++;
+        current++;
+        log("warn", "port in use, retrying", { port: current });
+        server.listen(current);
+      } else {
+        server.off("error", onError);
+        reject(err);
+      }
+    };
+    server.on("error", onError);
+    server.listen(current, () => {
+      server.off("error", onError);
+      const addr = server.address();
+      resolve(typeof addr === "object" && addr ? addr.port : current);
+    });
+  });
+}
+
+function shutdown(signal) {
+  log("info", "shutting down", { signal });
+  server.close(() => {
+    try { unlinkSync(RUNTIME_FILE); } catch { /* ignore */ }
+    process.exit(0);
+  });
+  setTimeout(() => process.exit(1), 3000).unref();
+}
+
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("uncaughtException", (e) => log("error", "uncaughtException", { message: e.message, stack: DEBUG ? e.stack : undefined }));
+process.on("unhandledRejection", (e) => log("error", "unhandledRejection", { message: e?.message || String(e) }));
+
+actualPort = await listenWithFallback(BASE_PORT);
+writeRuntime(actualPort);
+
+console.log(`AnswerMaker MCP server listening on http://0.0.0.0:${actualPort}/mcp`);
+console.log(`API Token: ${TOKEN.slice(0, 6)}… (${TOKEN_SOURCE}) — full value in token file below`);
+console.log(`Token file: ${TOKEN_FILE}`);
+console.log(`Health: http://localhost:${actualPort}/health`);
+if (DEBUG) console.log("Debug logging enabled (ANSWERMAKER_MCP_DEBUG=1)");

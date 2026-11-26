@@ -1,0 +1,179 @@
+// 本地数据仓储：桌面端使用 SQLite（Rust `db_*` 命令），浏览器预览回退 localStorage。
+//
+// 首次在桌面端启动时会读取旧的 localStorage 键并导入 SQLite（一次性迁移），
+// localStorage 原始键保留作为备份，之后所有读写都以 SQLite 为准。
+
+import { call, isTauri } from "./bridge";
+import type { FileEntry, KnowledgeDoc } from "./types";
+
+export type VaultSnapshot = { meta: unknown | null; items: unknown[] };
+
+export type DbSnapshot = {
+  docs: KnowledgeDoc[];
+  files: FileEntry[];
+  chunks: Record<string, string[]>;
+  vault: VaultSnapshot;
+  migrated: boolean;
+};
+
+const KEYS = {
+  docs: "am_docs",
+  chunks: "am_chunks_v2",
+  files: "am_files",
+  vaultMeta: "am_vault_v2_meta",
+  vaultItems: "am_vault_v2_items",
+};
+
+function read<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function localSnapshot(): DbSnapshot {
+  const docs = read<KnowledgeDoc[]>(KEYS.docs, []);
+  const hasFilesKey = (() => {
+    try {
+      return localStorage.getItem(KEYS.files) !== null;
+    } catch {
+      return false;
+    }
+  })();
+  const files = hasFilesKey
+    ? read<FileEntry[]>(KEYS.files, [])
+    : docs.map((d) => ({
+        id: `f-${d.id}`,
+        name: d.name,
+        kind: (d.source === "在线链接" ? "link" : "file") as FileEntry["kind"],
+        source: d.origin ?? d.name,
+        docId: d.id,
+        importedAt: d.importedAt ?? 0,
+        size: d.size,
+        status: d.status,
+      }));
+  return {
+    docs,
+    files,
+    chunks: read<Record<string, string[]>>(KEYS.chunks, {}),
+    vault: {
+      meta: read<unknown | null>(KEYS.vaultMeta, null),
+      items: read<unknown[]>(KEYS.vaultItems, []),
+    },
+    migrated: true,
+  };
+}
+
+async function importLocal(snap: DbSnapshot) {
+  await call("db_save_docs", { docs: snap.docs });
+  for (const [docId, chunks] of Object.entries(snap.chunks)) {
+    if (chunks.length) await call("db_save_chunks", { docId, chunks });
+  }
+  await call("db_save_files", { files: snap.files });
+  await call("db_save_vault", { meta: snap.vault.meta, items: snap.vault.items });
+  await call("db_mark_migrated");
+}
+
+let bootPromise: Promise<DbSnapshot> | null = null;
+
+/** 读取全量数据；桌面端首次调用会完成 localStorage → SQLite 迁移。 */
+export function loadAppData(): Promise<DbSnapshot> {
+  if (bootPromise) return bootPromise;
+  bootPromise = (async () => {
+    if (!isTauri()) return localSnapshot();
+    let snap = await call<DbSnapshot>("db_load_all");
+    if (!snap.migrated) {
+      const local = localSnapshot();
+      const hasLocal =
+        local.docs.length > 0 ||
+        local.files.length > 0 ||
+        Object.keys(local.chunks).length > 0 ||
+        local.vault.meta !== null ||
+        local.vault.items.length > 0;
+      if (hasLocal) {
+        // 以 localStorage 备份为准重新导入（幂等），避免上次迁移中断造成半份数据。
+        await importLocal(local);
+        snap = await call<DbSnapshot>("db_load_all");
+      } else {
+        await call("db_mark_migrated");
+      }
+      snap.migrated = true;
+    }
+    return snap;
+  })().catch((e) => {
+    bootPromise = null;
+    throw e;
+  });
+  return bootPromise;
+}
+
+/** 保险库缓存未初始化时的兜底（正常路径由启动快照注入）。 */
+export async function loadVaultData(): Promise<VaultSnapshot> {
+  if (!isTauri()) {
+    return {
+      meta: read<unknown | null>(KEYS.vaultMeta, null),
+      items: read<unknown[]>(KEYS.vaultItems, []),
+    };
+  }
+  return call<VaultSnapshot>("db_load_vault");
+}
+
+export async function saveDocs(docs: KnowledgeDoc[]) {
+  if (!isTauri()) {
+    localStorage.setItem(KEYS.docs, JSON.stringify(docs));
+    return;
+  }
+  await call("db_save_docs", { docs });
+}
+
+export async function saveFiles(files: FileEntry[]) {
+  if (!isTauri()) {
+    localStorage.setItem(KEYS.files, JSON.stringify(files));
+    return;
+  }
+  await call("db_save_files", { files });
+}
+
+export async function saveVault(meta: unknown | null, items: unknown[]) {
+  if (!isTauri()) {
+    if (meta === null) localStorage.removeItem(KEYS.vaultMeta);
+    else localStorage.setItem(KEYS.vaultMeta, JSON.stringify(meta));
+    localStorage.setItem(KEYS.vaultItems, JSON.stringify(items));
+    return;
+  }
+  await call("db_save_vault", { meta, items });
+}
+
+export async function saveChunks(docId: string, chunks: string[]) {
+  if (!isTauri()) {
+    const all = read<Record<string, string[]>>(KEYS.chunks, {});
+    all[docId] = chunks;
+    localStorage.setItem(KEYS.chunks, JSON.stringify(all));
+    return;
+  }
+  await call("db_save_chunks", { docId, chunks });
+}
+
+export async function deleteChunks(docId: string) {
+  if (!isTauri()) {
+    const all = read<Record<string, string[]>>(KEYS.chunks, {});
+    delete all[docId];
+    localStorage.setItem(KEYS.chunks, JSON.stringify(all));
+    return;
+  }
+  await call("db_delete_chunks", { docId });
+}
+
+/** 存储信息（设置页展示 SQLite 路径与数据量）。 */
+export type DbInfo = { path: string; docs: number; chunks: number; files: number; vaultItems: number };
+
+export async function dbInfo(): Promise<DbInfo | null> {
+  if (!isTauri()) return null;
+  try {
+    return await call<DbInfo>("db_info");
+  } catch {
+    return null;
+  }
+}
