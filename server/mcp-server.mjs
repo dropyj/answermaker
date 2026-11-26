@@ -218,6 +218,7 @@ function bm25Search(query, docs, limit = 5) {
         doc: doc.name,
         docId: doc.id,
         origin: doc.origin ?? "",
+        accountId: doc.accountId ?? "",
         chunkIndex,
         text,
         tokens: tokenize(text),
@@ -242,14 +243,17 @@ function bm25Search(query, docs, limit = 5) {
       score += idf * ((f * (k1 + 1)) / (f + k1 * (1 - b + (b * d.tokens.length) / avgLen)));
     }
     if (score > 0) {
-      hits.push({ doc: d.doc, docId: d.docId, origin: d.origin, chunkIndex: d.chunkIndex, score, text: d.text });
+      hits.push({ doc: d.doc, docId: d.docId, origin: d.origin, accountId: d.accountId ?? "", chunkIndex: d.chunkIndex, score, text: d.text });
     }
   }
   return hits.sort((a, b2) => b2.score - a.score).slice(0, limit);
 }
 
 function knowledgeSearch(query, limit = 5) {
-  return bm25Search(query, loadKnowledge().docs ?? [], limit);
+  return bm25Search(query, loadKnowledge().docs ?? [], limit).map((h) => ({
+    ...h,
+    account: accountLabel(h.accountId),
+  }));
 }
 
 function fileSearch(query, limit = 5) {
@@ -609,18 +613,18 @@ const TOOLS = [
   },
   {
     name: "link_read",
-    description: "经 popo-cli 读取 KM / POPO 文档链接正文（需已登录 popo-cli）。",
-    inputSchema: { type: "object", properties: { url: { type: "string" } }, required: ["url"] },
+    description: "经 popo-cli 读取 KM / POPO 文档链接正文（需已登录 popo-cli）。accountId 可选：指定数据归属账号（不传用默认 POPO 账号）；注意 POPO 会话由 popo-cli 统一托管，多账号会话隔离受 CLI 限制，accountId 只做归属标注与审计。",
+    inputSchema: { type: "object", properties: { url: { type: "string" }, accountId: { type: "string" } }, required: ["url"] },
   },
   {
     name: "popo_spaces",
-    description: "列出当前账号有权限的 POPO 团队空间。",
-    inputSchema: { type: "object", properties: {} },
+    description: "列出当前账号有权限的 POPO 团队空间。accountId 可选（不传用默认 POPO 账号；会话由 popo-cli 统一托管，见 link_read 说明）。",
+    inputSchema: { type: "object", properties: { accountId: { type: "string" } } },
   },
   {
     name: "popo_list",
-    description: "列出 POPO 个人云空间或团队空间目录；folderId=0 表示根目录，不传 teamSpaceId 表示个人云空间。",
-    inputSchema: { type: "object", properties: { teamSpaceId: { type: "string" }, folderId: { type: "string" } } },
+    description: "列出 POPO 个人云空间或团队空间目录；folderId=0 表示根目录，不传 teamSpaceId 表示个人云空间。accountId 可选（不传用默认 POPO 账号；会话由 popo-cli 统一托管）。",
+    inputSchema: { type: "object", properties: { teamSpaceId: { type: "string" }, folderId: { type: "string" }, accountId: { type: "string" } } },
   },
   {
     name: "notes_list",
@@ -736,14 +740,24 @@ async function callTool(name, args = {}, client = "unknown") {
     }
     case "link_read": {
       const url = requireString(args, "url");
-      return await readLink(url);
+      const accountId = typeof args.accountId === "string" && args.accountId ? args.accountId : "acct-popo-default";
+      const out = await readLink(url);
+      audit({ client, event: "online_read", tool: name, accountId, result: "ok" });
+      return { ...out, accountId, account: accountLabel(accountId) || "网易 POPO（工作）", sessionNote: "POPO 会话由 popo-cli 统一托管，accountId 仅作数据归属标注" };
     }
-    case "popo_spaces":
-      return { spaces: await listTeamSpaces() };
+    case "popo_spaces": {
+      const accountId = typeof args.accountId === "string" && args.accountId ? args.accountId : "acct-popo-default";
+      const spaces = await listTeamSpaces();
+      audit({ client, event: "online_read", tool: name, accountId, result: "ok" });
+      return { spaces, accountId };
+    }
     case "popo_list": {
       const teamSpaceId = typeof args.teamSpaceId === "string" ? args.teamSpaceId : "";
       const folderId = typeof args.folderId === "string" && args.folderId ? args.folderId : "0";
-      return await listFolder(teamSpaceId, folderId);
+      const accountId = typeof args.accountId === "string" && args.accountId ? args.accountId : "acct-popo-default";
+      const out = await listFolder(teamSpaceId, folderId);
+      audit({ client, event: "online_read", tool: name, accountId, result: "ok" });
+      return { ...out, accountId };
     }
     case "notes_list":
       return { notes: snapList("notes").slice(0, clampLimit(args.limit)) };

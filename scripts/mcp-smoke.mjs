@@ -171,12 +171,20 @@ try {
       snap.notes = [{ id: "smoke-note", title: "烟测速记标题", content: "烟测速记内容", createdAt: 1, updatedAt: 1, pinned: true }];
       snap.todos = [{ id: "smoke-todo", title: "烟测待办事项", status: "todo", priority: "normal", createdAt: 1, updatedAt: 1 }];
       snap.events = [{ id: "smoke-event", title: "烟测日程会议", startAt: Date.now() + 3600000, createdAt: 1, updatedAt: 1 }];
+      snap.accounts = [{ id: "acct-popo-default", kind: "doc-source", provider: "netease-popo", label: "网易 POPO（工作）", status: "connected" }];
+      snap.systems[0].accountId = "acct-popo-default";
+      snap.docs = [...(snap.docs ?? []), { id: "smoke-doc", name: "烟测归属文档", source: "在线链接", accountId: "acct-popo-default", chunks: ["烟测归属文档的正文内容"] }];
       writeFileSync(knowledgePath, JSON.stringify(snap, null, 2));
 
       const all2 = await rpc("tools/call", { name: "search_all", arguments: { query: "烟测", limit: 5 } });
       const all2Out = JSON.parse(all2.json?.result?.content?.[0]?.text ?? "{}");
       check("search_all includes systems", Array.isArray(all2Out.systems) && all2Out.systems.some((x) => x.id === "smoke-sys"));
       check("search_all includes notes/todos", (all2Out.notes ?? []).some((x) => x.id === "smoke-note") && (all2Out.todos ?? []).some((x) => x.id === "smoke-todo"));
+
+      const ks = await rpc("tools/call", { name: "knowledge_search", arguments: { query: "烟测归属", limit: 3 } });
+      const ksOut = JSON.parse(ks.json?.result?.content?.[0]?.text ?? "{}");
+      check("knowledge_search annotates account", (ksOut.hits ?? []).some((h) => h.accountId === "acct-popo-default" && h.account === "网易 POPO（工作）"));
+      check("search_all systems annotate account", (all2Out.systems ?? []).some((x) => x.account === "网易 POPO（工作）"));
 
       const nl = await rpc("tools/call", { name: "notes_list", arguments: {} });
       const nlOut = JSON.parse(nl.json?.result?.content?.[0]?.text ?? "{}");

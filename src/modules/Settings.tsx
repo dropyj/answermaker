@@ -12,11 +12,22 @@ const fmtTime = (iso?: string | null) => {
 };
 
 import SyncPanel, { type SyncData } from "./SyncPanel";
+import AccountsPanel from "./AccountsPanel";
+import type { Account, FileEntry, KnowledgeDoc } from "../types";
+import type { Dispatch, SetStateAction } from "react";
 import type { SyncPayload } from "../sync";
 
-export default function Settings({ syncData, onSyncMerge }: {
+export default function Settings({ syncData, onSyncMerge, accountsData }: {
   syncData?: SyncData;
   onSyncMerge?: (payload: SyncPayload) => Promise<string>;
+  accountsData?: {
+    accounts: Account[];
+    setAccounts: Dispatch<SetStateAction<Account[]>>;
+    docs: KnowledgeDoc[];
+    setDocs: Dispatch<SetStateAction<KnowledgeDoc[]>>;
+    files: FileEntry[];
+    setFiles: Dispatch<SetStateAction<FileEntry[]>>;
+  };
 } = {}) {
   const tauri = isTauri();
   const [auth, setAuth] = useState<PopoAuthStatus | null>(null);
@@ -193,6 +204,7 @@ export default function Settings({ syncData, onSyncMerge }: {
   return (
     <div className="panel">
       <h2>设置 Settings</h2>
+      {accountsData && <AccountsPanel {...accountsData} />}
       {syncData && onSyncMerge && <SyncPanel data={syncData} onMerge={onSyncMerge} />}
 
       <h3>在线内容登录（POPO / KM）</h3>

@@ -13,6 +13,7 @@ import { setAppExtras } from "./mcpSync";
 import { importVaultItem, isUnlocked, listEncItems } from "./crypto";
 import { setAttachmentIndex, type AttachmentRecord } from "./attachments";
 import { mergeById, type SyncPayload } from "./sync";
+import { migratePopoAttribution, POPO_DEFAULT_ACCOUNT_ID } from "./accounts";
 import { searchSystems } from "./systems";
 import FileHitCard from "./modules/FileHitCard";
 import Mcp from "./modules/Mcp";
@@ -27,10 +28,10 @@ import { call, isTauri } from "./bridge";
 import { uid } from "./types";
 import { installMcpSync, scheduleMcpSync } from "./mcpSync";
 import { isMcpFollowMain } from "./mcpPrefs";
-import { loadAppData, saveDocs as saveDocsDb, saveFiles as saveFilesDb, saveProjects as saveProjectsDb, saveLinks as saveLinksDb, saveSystems as saveSystemsDb, saveNotes as saveNotesDb, saveTodos as saveTodosDb, saveEvents as saveEventsDb, saveAttachments as saveAttachmentsDb } from "./db";
+import { loadAppData, saveDocs as saveDocsDb, saveFiles as saveFilesDb, saveProjects as saveProjectsDb, saveLinks as saveLinksDb, saveSystems as saveSystemsDb, saveNotes as saveNotesDb, saveTodos as saveTodosDb, saveEvents as saveEventsDb, saveAttachments as saveAttachmentsDb, saveAccounts as saveAccountsDb } from "./db";
 import { initChunks } from "./search";
 import { initVaultStore } from "./crypto";
-import type { AgentCli, CalEvent, ChatMessage, ChatMode, FileEntry, KnowledgeDoc, ModelId, Note, OllamaStatus, Project, ProjectLink, SearchHit, SecretRequest, SystemEntry, Todo, VaultHit } from "./types";
+import type { Account, AgentCli, CalEvent, ChatMessage, ChatMode, FileEntry, KnowledgeDoc, ModelId, Note, OllamaStatus, Project, ProjectLink, SearchHit, SecretRequest, SystemEntry, Todo, VaultHit } from "./types";
 
 type Section = SectionKey;
 const NAV: { id: Section; label: string; icon: string }[] = [
@@ -186,6 +187,10 @@ export default function App() {
   const [todos, setTodos] = useState<Todo[]>([]);
   const [events, setEvents] = useState<CalEvent[]>([]);
   const [attachments, setAttachments] = useState<AttachmentRecord[]>([]);
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [currentAccountId, setCurrentAccountId] = useState<string>(() => {
+    try { return localStorage.getItem("am_current_account") || POPO_DEFAULT_ACCOUNT_ID; } catch { return POPO_DEFAULT_ACCOUNT_ID; }
+  });
   const [focusId, setFocusId] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
 
@@ -236,6 +241,13 @@ export default function App() {
         setTodos(snap.todos);
         setEvents(snap.events);
         setAttachments((snap.attachments ?? []) as AttachmentRecord[]);
+        // WF5 迁移：旧的在线文档/文件补 accountId 到默认 POPO 账号（不存在则自动建立）
+        const mig = migratePopoAttribution(snap.accounts, restored, snap.files);
+        setAccounts(mig.accounts);
+        if (mig.changed) {
+          setDocs(mig.docs);
+          setFiles(mig.files);
+        }
         setReady(true);
       } catch (e) {
         if (alive) {
@@ -297,6 +309,13 @@ export default function App() {
 
   useEffect(() => {
     if (!ready || bootError) return;
+    void saveAccountsDb(accounts).catch(() => {});
+  }, [accounts, ready, bootError]);
+  useEffect(() => {
+    try { localStorage.setItem("am_current_account", currentAccountId); } catch { /* ignore */ }
+  }, [currentAccountId]);
+  useEffect(() => {
+    if (!ready || bootError) return;
     void saveAttachmentsDb(attachments).catch(() => {});
     setAttachmentIndex(attachments);
   }, [attachments, ready, bootError]);
@@ -318,6 +337,7 @@ export default function App() {
     apply("笔记", notes, payload.notes, setNotes);
     apply("待办", todos, payload.todos, setTodos);
     apply("日程", events, payload.events, setEvents);
+    apply("账号", accounts, payload.accounts, setAccounts);
     if (payload.vault === null) parts.push("保险库：来源设备导出时未解锁，未包含");
     else if (!isUnlocked()) parts.push(`保险库：本机未解锁，跳过 ${payload.vault.length} 条（解锁后重新导入即可）`);
     else {
@@ -330,13 +350,13 @@ export default function App() {
       parts.push(`保险库 新增 ${added}/更新 ${updated}（已按本机主密码重新加密）`);
     }
     return parts.length ? parts.join("；") : "同步包没有可合并的新数据";
-  }, [projects, links, systems, notes, todos, events]);
+  }, [projects, links, systems, notes, todos, events, accounts]);
 
   // MCP 附加快照（systems/projects/notes/todos/events/accounts）随 knowledge.json 同步
   useEffect(() => {
-    setAppExtras({ projects, links, systems, notes, todos, events, accounts: [] });
+    setAppExtras({ projects, links, systems, notes, todos, events, accounts });
     if (ready) scheduleMcpSync(docs, files);
-  }, [projects, links, systems, notes, todos, events, ready]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [projects, links, systems, notes, todos, events, accounts, ready]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // MCP 写工具 ingest 队列：轮询 server 落盘的 notes/todos/events 写入请求，导入落库后 ack（真实闭环）
   useEffect(() => {
@@ -624,13 +644,13 @@ export default function App() {
         )} />
 
         {section === "vault" && <Vault secretReqs={secretReqs} onRefreshSecrets={refreshSecretReqs} projects={projects} links={links} setLinks={setLinks} focusId={focusId} attachments={attachments} setAttachments={setAttachments} />}
-        {section === "knowledge" && <Knowledge docs={docs} setDocs={setDocs} files={files} setFiles={setFiles} projects={projects} links={links} setLinks={setLinks} focusId={focusId} />}
-        {section === "files" && <Files files={files} setFiles={setFiles} docs={docs} projects={projects} links={links} setLinks={setLinks} focusId={focusId} />}
-        {section === "systems" && <Systems systems={systems} setSystems={setSystems} projects={projects} links={links} setLinks={setLinks} focusId={focusId} />}
+        {section === "knowledge" && <Knowledge docs={docs} setDocs={setDocs} files={files} setFiles={setFiles} projects={projects} links={links} setLinks={setLinks} focusId={focusId} accounts={accounts} currentAccountId={currentAccountId} setCurrentAccountId={setCurrentAccountId} />}
+        {section === "files" && <Files files={files} setFiles={setFiles} docs={docs} projects={projects} links={links} setLinks={setLinks} focusId={focusId} accounts={accounts} />}
+        {section === "systems" && <Systems systems={systems} setSystems={setSystems} projects={projects} links={links} setLinks={setLinks} focusId={focusId} accounts={accounts} />}
         {section === "projects" && <Projects projects={projects} setProjects={setProjects} links={links} setLinks={setLinks} docs={docs} files={files} systems={systems} notes={notes} todos={todos} go={go} />}
         {section === "tasks" && <Tasks notes={notes} setNotes={setNotes} todos={todos} setTodos={setTodos} events={events} setEvents={setEvents} projects={projects} focusId={focusId} />}
         {section === "mcp" && <Mcp />}
-        {section === "settings" && <Settings syncData={{ projects, links, systems, notes, todos, events, accounts: [] }} onSyncMerge={mergeSyncPayload} />}
+        {section === "settings" && <Settings syncData={{ projects, links, systems, notes, todos, events, accounts }} onSyncMerge={mergeSyncPayload} accountsData={{ accounts, setAccounts, docs, setDocs, files, setFiles }} />}
         {section === "chat" && (
           <div className="chatwrap">
             <div className="chatmain">
@@ -656,12 +676,12 @@ export default function App() {
                     )}
                     {m.systemHits && m.systemHits.length > 0 && (
                       <div className="file-hits">
-                        {m.systemHits.map((x) => <SystemHitCard key={x.id} sys={x} />)}
+                        {m.systemHits.map((x) => <SystemHitCard key={x.id} sys={x} accounts={accounts} />)}
                       </div>
                     )}
                     {m.fileHits && m.fileHits.length > 0 && (
                       <div className="file-hits">
-                        {m.fileHits.map((f) => <FileHitCard key={f.id} entry={f} />)}
+                        {m.fileHits.map((f) => <FileHitCard key={f.id} entry={f} accountLabel={f.accountId ? (accounts.find((a) => a.id === f.accountId)?.label ?? "未知账号") : undefined} />)}
                       </div>
                     )}
                     {m.vaultHits && m.vaultHits.length > 0 && (

@@ -31,10 +31,12 @@ export default function PopoImport({
   docs,
   setDocs,
   setFiles,
+  accountId,
 }: {
   docs: KnowledgeDoc[];
   setDocs: Dispatch<SetStateAction<KnowledgeDoc[]>>;
   setFiles: Dispatch<SetStateAction<FileEntry[]>>;
+  accountId?: string;
 }) {
   const tauri = isTauri();
   const [open, setOpen] = useState(false);
@@ -166,12 +168,12 @@ export default function PopoImport({
           const doc: KnowledgeDoc = {
             id: uid(), name: item.name, source: "在线链接", chunks: 0, stage: "仅登记", status: "registered",
             syncStatus: `POPO · ${kindLabel(item)}，暂不支持解析正文，已登记链接`,
-            origin: item.url, importedAt: Date.now(), mirror: "（暂不支持解析该类型正文）",
+            origin: item.url, importedAt: Date.now(), accountId, mirror: "（暂不支持解析该类型正文）",
           };
           setDocs((prev) => [doc, ...prev]);
           setFiles((prev) => upsertFile(prev, {
             id: uid(), name: item.name, kind: "link", source: item.url, docId: doc.id,
-            importedAt: doc.importedAt ?? Date.now(), status: "registered",
+            importedAt: doc.importedAt ?? Date.now(), accountId, status: "registered",
           }));
           registered++;
           continue;
@@ -187,26 +189,26 @@ export default function PopoImport({
           const doc: KnowledgeDoc = {
             id: uid(), name: title, source: "在线链接", chunks: chunks.length, stage: "已入库", status: "indexed",
             syncStatus: `POPO · 单篇导入（${kindLabel(item)}），已切块入本地 BM25 索引`,
-            origin: item.url, importedAt: Date.now(), content: text,
+            origin: item.url, importedAt: Date.now(), accountId, content: text,
             mirror: `POPO · 已导入 ${text.replace(/\s+/g, " ").length} 字`,
           };
           saveChunks(doc.id, chunks);
           setDocs((prev) => [doc, ...prev]);
           setFiles((prev) => upsertFile(prev, {
             id: uid(), name: title, kind: "link", source: item.url, docId: doc.id,
-            importedAt: doc.importedAt ?? Date.now(), size: new Blob([text]).size, status: "indexed",
+            importedAt: doc.importedAt ?? Date.now(), accountId, size: new Blob([text]).size, status: "indexed",
           }));
           ok++;
         } else {
           const doc: KnowledgeDoc = {
             id: uid(), name: title, source: "在线链接", chunks: 0, stage: "仅登记", status: "registered",
             syncStatus: `POPO · ${kindLabel(item)}，未返回可解析正文，仅登记`,
-            origin: item.url, importedAt: Date.now(), mirror: "（未返回正文）",
+            origin: item.url, importedAt: Date.now(), accountId, mirror: "（未返回正文）",
           };
           setDocs((prev) => [doc, ...prev]);
           setFiles((prev) => upsertFile(prev, {
             id: uid(), name: title, kind: "link", source: item.url, docId: doc.id,
-            importedAt: doc.importedAt ?? Date.now(), status: "registered",
+            importedAt: doc.importedAt ?? Date.now(), accountId, status: "registered",
           }));
           registered++;
         }

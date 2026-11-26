@@ -84,6 +84,10 @@ fn popo_js_path() -> Option<String> {
     }
 }
 
+/// 账号隔离边界（WF5）：popo-cli 的登录态由其自行托管在本机（无公开的按账号
+/// 配置目录/环境变量可供切换），因此多账号的**会话**隔离受 CLI 限制；
+/// 应用按 accountId 隔离的是数据归属、筛选、断开与审计，会话仍是当前 popo-cli 登录的那个账号。
+/// 这里不通过改 HOME 等方式假装隔离，避免破坏 CLI 自身的会话与锁。
 fn popo_command() -> Command {
     if let Some(js) = popo_js_path() {
         let mut cmd = Command::new(node_bin());

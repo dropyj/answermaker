@@ -4,7 +4,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { isTauri } from "../bridge";
 import { upsertFile } from "../files";
 import { uid } from "../types";
-import type { FileEntry, FileKind, KnowledgeDoc, Project, ProjectLink } from "../types";
+import type { Account, FileEntry, FileKind, KnowledgeDoc, Project, ProjectLink } from "../types";
 import ProjectPicker from "./ProjectPicker";
 import { useEffect } from "react";
 import FileHitCard from "./FileHitCard";
@@ -20,6 +20,7 @@ export default function Files({
   links: projLinks = [],
   setLinks,
   focusId,
+  accounts = [],
 }: {
   files: FileEntry[];
   setFiles: Dispatch<SetStateAction<FileEntry[]>>;
@@ -28,6 +29,7 @@ export default function Files({
   links?: ProjectLink[];
   setLinks?: (next: ProjectLink[]) => void;
   focusId?: string | null;
+  accounts?: Account[];
 }) {
   useEffect(() => {
     if (!focusId) return;
@@ -44,10 +46,12 @@ export default function Files({
   const [notice, setNotice] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
 
+  const [accountFilter, setAccountFilter] = useState<string>("all");
   const groups = useMemo<{ key: GroupKey; title: string; hint: string; items: FileEntry[] }[]>(() => {
     const q = filter.trim().toLowerCase();
     const filtered = files
       .filter((f) => (kind === "all" ? true : f.kind === kind))
+      .filter((f) => accountFilter === "all" ? true : accountFilter === "local" ? !f.accountId : f.accountId === accountFilter)
       .filter((f) => !q || f.name.toLowerCase().includes(q) || f.source.toLowerCase().includes(q))
       .sort((a, b) => b.importedAt - a.importedAt);
     return [
@@ -70,7 +74,7 @@ export default function Files({
         items: filtered.filter((f) => f.status !== "indexed" && !f.docId),
       },
     ];
-  }, [files, filter, kind]);
+  }, [files, filter, kind, accountFilter]);
   const total = groups.reduce((n, g) => n + g.items.length, 0);
   const activeGroup = groups.find((g) => g.key === groupTab) ?? groups[0];
 
@@ -181,6 +185,13 @@ export default function Files({
         <button className={kind === "all" ? "mode on" : "mode"} onClick={() => setKind("all")}>全部</button>
         <button className={kind === "link" ? "mode on" : "mode"} onClick={() => setKind("link")}>链接</button>
         <button className={kind === "file" ? "mode on" : "mode"} onClick={() => setKind("file")}>文件</button>
+        {accounts.length > 0 && (
+          <select value={accountFilter} onChange={(e) => setAccountFilter(e.target.value)} title="按来源账号筛选">
+            <option value="all">全部账号</option>
+            <option value="local">本地（无账号）</option>
+            {accounts.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
+          </select>
+        )}
       </div>
       {files.length === 0 ? (
         <div className="dim" style={{ padding: "8px 2px" }}>
@@ -213,6 +224,7 @@ export default function Files({
                     entry={f}
                     docName={docs.find((d) => d.id === f.docId)?.name}
                     onDelete={() => setFiles((prev) => prev.filter((x) => x.id !== f.id))}
+                    accountLabel={f.accountId ? (accounts.find((a) => a.id === f.accountId)?.label ?? "未知账号") : undefined}
                   />
                   {setLinks && <ProjectPicker projects={projects} links={projLinks} entityType="file" entityId={f.id} setLinks={setLinks} />}
                 </li>

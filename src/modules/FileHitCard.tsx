@@ -8,10 +8,12 @@ export default function FileHitCard({
   entry,
   docName,
   onDelete,
+  accountLabel,
 }: {
   entry: FileEntry;
   docName?: string;
   onDelete?: () => void;
+  accountLabel?: string;
 }) {
   const [copied, setCopied] = useState(false);
   const [msg, setMsg] = useState("");
@@ -53,6 +55,7 @@ export default function FileHitCard({
         {entry.status === "indexed"
           ? <span className="badge ok">已同步 RAG</span>
           : <span className="badge warn">{entry.docId ? "仅登记" : "未同步 RAG"}</span>}
+        {accountLabel && <span className="badge">{accountLabel}</span>}
       </div>
       <div className="file-source">
         <span className="dim">地址：</span>

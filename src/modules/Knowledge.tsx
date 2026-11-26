@@ -4,7 +4,7 @@ import { useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { call, isTauri } from "../bridge";
-import type { FileEntry, KnowledgeDoc, LinkReadResult, Project, ProjectLink } from "../types";
+import type { Account, FileEntry, KnowledgeDoc, LinkReadResult, Project, ProjectLink } from "../types";
 import ProjectPicker from "./ProjectPicker";
 import { extractPdfText } from "../pdf";
 import { uid } from "../types";
@@ -26,7 +26,7 @@ function stripHtml(html: string): string {
 
 const clip = (text: string, n = 120) => (text.length > n ? `${text.slice(0, n)}…` : text);
 
-export default function Knowledge({ docs, setDocs, files, setFiles, projects = [], links = [], setLinks, focusId }: {
+export default function Knowledge({ docs, setDocs, files, setFiles, projects = [], links = [], setLinks, focusId, accounts = [], currentAccountId = "", setCurrentAccountId }: {
   docs: KnowledgeDoc[];
   setDocs: Dispatch<SetStateAction<KnowledgeDoc[]>>;
   files: FileEntry[];
@@ -35,7 +35,13 @@ export default function Knowledge({ docs, setDocs, files, setFiles, projects = [
   links?: ProjectLink[];
   setLinks?: (next: ProjectLink[]) => void;
   focusId?: string | null;
+  accounts?: Account[];
+  currentAccountId?: string;
+  setCurrentAccountId?: (id: string) => void;
 }) {
+  const [accountFilter, setAccountFilter] = useState<string>("all");
+  const accountOf = (id?: string) => accounts.find((a) => a.id === id);
+  const shownDocs = accountFilter === "all" ? docs : accountFilter === "local" ? docs.filter((d) => !d.accountId) : docs.filter((d) => d.accountId === accountFilter);
   const [url, setUrl] = useState("");
   const [linkName, setLinkName] = useState("");
   const [notice, setNotice] = useState("");
@@ -204,10 +210,10 @@ export default function Knowledge({ docs, setDocs, files, setFiles, projects = [
       const doc: KnowledgeDoc = {
         id: uid(), name, source: "在线链接", chunks: 0, stage: "仅登记", status: "registered",
         syncStatus: "仅登记：浏览器预览没有本地后端；在线正文读取需运行 Tauri 桌面端并经 popo-cli 登录",
-        mirror: "（未抓取正文，无镜像内容）", origin: link, importedAt: Date.now(),
+        mirror: "（未抓取正文，无镜像内容）", origin: link, importedAt: Date.now(), accountId: currentAccountId || undefined,
       };
       setDocs((prev) => [doc, ...prev]);
-      archive({ name, kind: "link", source: link, docId: doc.id, importedAt: doc.importedAt ?? Date.now(), status: "registered" });
+      archive({ name, kind: "link", source: link, docId: doc.id, importedAt: doc.importedAt ?? Date.now(), status: "registered", accountId: currentAccountId || undefined });
       setNotice(`链接「${name}」已登记。桌面端登录后可真实读取 KM / POPO 文档正文并切块入库。`);
       setUrl("");
       setLinkName("");
@@ -229,13 +235,13 @@ export default function Knowledge({ docs, setDocs, files, setFiles, projects = [
           id: uid(), name, source: "在线链接", chunks: 0, stage: "解析", status: "indexed",
           syncStatus: `${kindLabel} · 已通过 popo-cli 拉取正文并切块（本地 BM25 索引）`,
           mirror: `${kindLabel} · 已拉取 ${body.replace(/\s+/g, " ").length} 字${result.summary && result.summary !== body ? ` · 摘要：${clip(result.summary, 80)}` : ""}`,
-          content: body, origin, importedAt: Date.now(),
+          content: body, origin, importedAt: Date.now(), accountId: currentAccountId || undefined,
         };
         saveChunks(doc.id, chunks);
         setDocs((prev) => [doc, ...prev]);
         archive({
           name, kind: "link", source: origin, docId: doc.id, importedAt: doc.importedAt ?? Date.now(),
-          size: new Blob([body]).size, status: "indexed",
+          size: new Blob([body]).size, status: "indexed", accountId: currentAccountId || undefined,
         });
         animateStages(doc.id, chunks.length);
         setNotice(`「${name}」已读取并切块：${chunks.length} 块（约 512 字符/块，重叠 80）。`);
@@ -244,10 +250,10 @@ export default function Knowledge({ docs, setDocs, files, setFiles, projects = [
           id: uid(), name, source: "在线链接", chunks: 0, stage: "仅登记", status: "registered",
           syncStatus: `${kindLabel} · 已读取元数据，但该资源没有返回正文（可能只有元数据或当前账号无权限）`,
           mirror: result.summary ? `摘要：${clip(result.summary, 160)}` : "（未返回正文）",
-          origin, importedAt: Date.now(),
+          origin, importedAt: Date.now(), accountId: currentAccountId || undefined,
         };
         setDocs((prev) => [doc, ...prev]);
-        archive({ name, kind: "link", source: origin, docId: doc.id, importedAt: doc.importedAt ?? Date.now(), status: "registered" });
+        archive({ name, kind: "link", source: origin, docId: doc.id, importedAt: doc.importedAt ?? Date.now(), status: "registered", accountId: currentAccountId || undefined });
         setNotice(`「${name}」已读取元数据，但没有正文可切块。`);
       }
       setPreview(result);
@@ -348,7 +354,23 @@ export default function Knowledge({ docs, setDocs, files, setFiles, projects = [
           {reading ? "读取中…" : isTauri() ? "读取链接并入库" : "添加链接（登记）"}
         </button>
       </div>
-      <PopoImport docs={docs} setDocs={setDocs} setFiles={setFiles} />
+      {accounts.length > 0 && (
+        <div className="row">
+          <span className="dim">当前导入账号（新导入的在线文档归属该账号）：</span>
+          <select value={currentAccountId} onChange={(e) => setCurrentAccountId?.(e.target.value)}>
+            {accounts.filter((a) => a.provider === "netease-popo").map((a) => (
+              <option key={a.id} value={a.id}>{a.label}{a.status === "disconnected" ? "（已断开）" : ""}</option>
+            ))}
+          </select>
+          <span className="dim">按账号筛选：</span>
+          <select value={accountFilter} onChange={(e) => setAccountFilter(e.target.value)}>
+            <option value="all">全部</option>
+            <option value="local">本地文件（无账号）</option>
+            {accounts.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
+          </select>
+        </div>
+      )}
+      <PopoImport docs={docs} setDocs={setDocs} setFiles={setFiles} accountId={currentAccountId || undefined} />
       {error && <p className="error">{error}</p>}
       {preview && (
         <div className="card">
@@ -368,12 +390,13 @@ export default function Knowledge({ docs, setDocs, files, setFiles, projects = [
         <button disabled title="云端向量库仅预留接口，本期不实现、不上传">启用云端向量库（待开发）</button>
       </div>
       <ul className="list">
-        {docs.map((d) => (
+        {shownDocs.map((d) => (
           <li key={d.id} className="card" data-focus={d.id}>
             <div><strong>{d.name}</strong> <span className="badge">{d.source}</span>
               {d.status === "indexed"
                 ? <span className="badge">已入库（真实切块）</span>
                 : <span className="badge warn">仅登记</span>}
+              {d.accountId && <span className="badge">{accountOf(d.accountId)?.label ?? "未知账号"}{accountOf(d.accountId)?.status === "disconnected" ? "（已断开）" : ""}</span>}
             </div>
             {d.status === "indexed" && (
               <div>{STAGE_FLOW.map((s) => <span key={s} className={STAGE_FLOW.indexOf(d.stage as typeof STAGE_FLOW[number]) >= STAGE_FLOW.indexOf(s) ? "step on" : "step"}>{s}</span>)}</div>
@@ -421,7 +444,7 @@ export default function Knowledge({ docs, setDocs, files, setFiles, projects = [
             )}
           </li>
         ))}
-        {docs.length === 0 && <li className="dim">暂无文档。导入文件、链接或 POPO 文档后会显示在这里。</li>}
+        {shownDocs.length === 0 && <li className="dim">暂无文档（当前账号筛选下）。导入文件、链接或 POPO 文档后会显示在这里。</li>}
       </ul>
     </div>
   );

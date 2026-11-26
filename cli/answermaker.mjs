@@ -277,9 +277,11 @@ async function main() {
   }
 
   if (cmd === "link" && sub === "read") {
-    const url = rest.join(" ").trim();
-    if (!url) { console.error("用法：answermaker link read <url>"); process.exit(1); }
+    const account = accountFlag(rest);
+    const url = rest.filter((a, i) => a !== "--account" && rest[i - 1] !== "--account").join(" ").trim();
+    if (!url) { console.error("用法：answermaker link read <url> [--account <accountId>]"); process.exit(1); }
     const res = await readLink(url);
+    if (account) console.log(`（归属账号：${account}；注意 POPO 会话由 popo-cli 统一托管，--account 仅作归属标注）`);
     console.log(`# ${res.title || url}`);
     console.log(`来源：${res.url}（${res.kind}）`);
     console.log("");
@@ -288,6 +290,8 @@ async function main() {
   }
 
   if (cmd === "popo" && sub === "spaces") {
+    const account = accountFlag(rest);
+    if (account) console.log(`（归属账号：${account}；POPO 会话由 popo-cli 统一托管，--account 仅作归属标注）`);
     const spaces = await listTeamSpaces();
     if (!spaces.length) { console.log("（当前账号没有可访问的团队空间，或 popo-cli 未登录）"); return; }
     for (const s of spaces) console.log(`${s.id}\t${s.name}\t${s.key || ""}`);
@@ -295,8 +299,11 @@ async function main() {
   }
 
   if (cmd === "popo" && sub === "ls") {
-    const arg = rest[0] || "personal";
-    const folderId = rest[1] || "0";
+    const account = accountFlag(rest);
+    if (account) console.log(`（归属账号：${account}；POPO 会话由 popo-cli 统一托管，--account 仅作归属标注）`);
+    const clean = rest.filter((a, i) => a !== "--account" && rest[i - 1] !== "--account");
+    const arg = clean[0] || "personal";
+    const folderId = clean[1] || "0";
     const teamSpaceId = arg === "personal" ? "" : arg;
     const res = await listFolder(teamSpaceId, folderId);
     if (!res.items.length) { console.log("（目录为空）"); return; }
@@ -460,7 +467,7 @@ async function main() {
   answermaker knowledge get <id|名称>       读取文档全部切块
   answermaker files list                    列出文件管理归档
   answermaker files search <关键词>         检索文件/链接名称与地址
-  answermaker link read <url>               读取 KM/POPO 链接正文（需 popo-cli 登录）
+  answermaker link read <url> [--account <id>] 读取 KM/POPO 链接正文（需 popo-cli 登录）
   answermaker popo spaces                   列出团队空间
   answermaker popo ls personal [folderId]   列个人云空间目录
   answermaker popo ls <teamSpaceId> [folderId] 列团队空间目录
