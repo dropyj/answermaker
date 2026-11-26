@@ -9,3 +9,5 @@ mcp-token.txt
 *.log
 *.db
 .env
+
+*.tsbuildinfo
