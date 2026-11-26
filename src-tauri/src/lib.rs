@@ -283,6 +283,7 @@ pub fn run() {
     let conn = db::open().unwrap_or_else(|e| panic!("本地数据库初始化失败：{e}"));
     let app = tauri::Builder::default()
         .manage(db::DbState(std::sync::Mutex::new(conn)))
+        .manage(vault_crypto::VaultKekState(std::sync::Mutex::new(None)))
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             db::db_load_all,
@@ -306,6 +307,13 @@ pub fn run() {
             vault_list,
             vault_upsert,
             vault_get_ref,
+            vault_crypto::vault_crypto_derive,
+            vault_crypto::vault_crypto_ready,
+            vault_crypto::vault_crypto_encrypt,
+            vault_crypto::vault_crypto_decrypt,
+            vault_crypto::vault_crypto_encrypt_bytes,
+            vault_crypto::vault_crypto_decrypt_bytes,
+            vault_crypto::vault_crypto_lock,
             knowledge_ingest,
             mcp::mcp_status,
             mcp::mcp_start,

@@ -1,4 +1,4 @@
-import { decryptBytes, encryptBytes } from "./crypto";
+import { decryptBytes, encryptBytesWithVer, type CryptoVer } from "./crypto";
 import { uid } from "./types";
 
 /**
@@ -15,6 +15,7 @@ export interface AttachmentRecord {
   mime: string;
   size: number; // 明文字节数
   cipher: { iv: string; ct: string };
+  cryptoVer?: CryptoVer; // 密文格式（旧记录缺省，解密时按会话推断）
   createdAt: number;
 }
 
@@ -32,17 +33,17 @@ export async function makeAttachment(itemId: string, file: File): Promise<Attach
     throw new Error(`附件超过上限 5MB（当前 ${(file.size / 1024 / 1024).toFixed(2)}MB）`);
   }
   const buf = await file.arrayBuffer();
-  const cipher = await encryptBytes(buf);
-  if (!cipher) throw new Error("保险库已锁定，无法加密附件，请先解锁");
+  const enc = await encryptBytesWithVer(buf);
+  if (!enc) throw new Error("保险库已锁定，无法加密附件，请先解锁");
   return {
     id: uid(), itemId, name: file.name, mime: file.type || "application/octet-stream",
-    size: file.size, cipher, createdAt: Date.now(),
+    size: file.size, cipher: enc.blob, cryptoVer: enc.ver, createdAt: Date.now(),
   };
 }
 
 /** 解密并触发浏览器/应用下载；明文只落到用户这次选择保存的位置。 */
 export async function exportAttachment(rec: AttachmentRecord): Promise<void> {
-  const buf = await decryptBytes(rec.cipher);
+  const buf = await decryptBytes(rec.cipher, rec.cryptoVer);
   const blob = new Blob([buf], { type: rec.mime });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");

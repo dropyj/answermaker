@@ -64,7 +64,7 @@ AnswerMaker 是本地 AI 中枢桌面应用：加密保险库 + RAG 知识库 + 
 - **前端**：React 18、TypeScript 5、Vite 5、Font Awesome 7（solid）
 - **桌面**：Tauri 2、Rust（edition 2021）、tauri-plugin-dialog
 - **数据库**：SQLite（rusqlite bundled，WAL）
-- **加密**：WebCrypto PBKDF2-SHA256（210,000 次）+ AES-256-GCM（每条目独立 IV）
+- **加密**：双实现双读单写——WebCrypto PBKDF2-SHA256（210,000 次）+ AES-256-GCM（浏览器与存量数据，cryptoVer=web-pbkdf2）；桌面端 Rust Argon2id（m=64MiB/t=3/p=4）派生 KEK + 每条目随机 DEK 的 AES-256-GCM 信封加密（cryptoVer=rust-argon2id，`vault_crypto.rs` 已实现并接线，KEK 只存 Rust 进程内存）。解密按条目 cryptoVer 分发，存量密文永远可读；不强制迁移，桌面端新写入优先 Rust、编辑重存自然升级；整库 rust 主格式仅在桌面端首次建库时产生（浏览器打不开，会明确报错）
 - **检索**：本地 BM25（中文单字 + 双字 bigram；英文/数字按词）；k1=1.5、b=0.75；其上有本地召回反馈闭环（项3b，±15% 封顶调整，见 §4.3）
 - **MCP**：Node 标准库实现 Streamable HTTP JSON-RPC 子集（initialize / ping / tools/list / tools/call），Bearer Token
 - **CLI**：Node 标准库，入口 `cli/answermaker.mjs`（`am` / `answermaker`）
@@ -107,7 +107,7 @@ src-tauri/src/
 ├─ popo.rs                 popo-cli 封装（CLI_LOCK 串行、45s 超时、JSON 解析）
 ├─ ollama.rs               检测/安装/启动/拉模型/硬件推荐
 ├─ agent.rs                Agent 探测与非交互执行（白名单、240s 超时、ANSI 清理）
-└─ vault_crypto.rs         Argon2id 信封加密设计（**占位，未实现**）
+└─ vault_crypto.rs         Argon2id + AES-256-GCM 信封加密（已实现：derive/encrypt/decrypt/bytes/lock 命令 + 会话 KEK 状态；本机无 cargo 未编译，待 Windows cargo check）
 
 server/
 ├─ mcp-server.mjs          MCP 服务端（16 工具、Token、CORS、批量、端口顺延、密钥请求）
@@ -355,7 +355,7 @@ am audit tail [n]
 
 ### P0 — 安全 / 正确性
 
-1. **Rust 保险库实现**：`vault_crypto.rs` 仍为占位；目标 Argon2id + OS 钥匙串，替代前端 PBKDF2；设计迁移路径（保持现有密文可解密）。
+1. **Rust 保险库实现**：`vault_crypto.rs` 已实现 Argon2id + AES-256-GCM 信封加密并接线（双读单写、按条目 cryptoVer 分发、不强制迁移）；待 Windows `cargo check` 验证编译；后续目标 OS 钥匙串托管 KEK。
 2. **MCP 密钥取用审计**：✅ V0.3 已落地：服务端 append-only 写 `server/data/audit.log`（JSONL：ts/client/event/tool/ref/purpose/result），覆盖鉴权失败、工具调用、密钥申请/状态查询/释放；应用授权/拒绝经 Rust 回写同一日志；MCP 面板有最近 20 条只读列表，CLI 有 `audit tail`；绝不记录 Token 值与密钥明文。
 3. **多 Token / 按客户端授权与撤销**：✅ V0.3 已落地：`server/data/tokens.json` 多客户端存储（{id,name,token,createdAt,lastUsedAt,revoked}），旧 env / mcp-token.txt 兼容为 default 客户端；服务端按文件 mtime 热加载，撤销即时生效、lastUsedAt 60 秒节流落盘；CLI `token list|add|revoke` 与 MCP 面板均可管理，Token 只在新增时完整显示一次。
 4. **临时文件安全加固**：Windows ACL 收紧、应用/服务退出清理、崩溃残留扫描；可选「一次性读取即删除」。

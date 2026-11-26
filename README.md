@@ -36,7 +36,7 @@ answermaker/
 │  ├─ types.ts             五字段模型、通用工具、Token 生成
 │  ├─ bridge.ts            Tauri 命令封装（在线登录/链接读取，浏览器预览降级）
 │  ├─ db.ts                本地仓储：SQLite 读写 + 首次 localStorage 迁移 + 浏览器回退
-│  ├─ crypto.ts            保险库 WebCrypto 加密（PBKDF2 + AES-GCM，密文入 SQLite）
+│  ├─ crypto.ts            保险库加密（WebCrypto PBKDF2 / 桌面端 Rust Argon2id 双读单写，密文入 SQLite）
 │  ├─ search.ts            真实切块（512/重叠80）+ BM25 检索 + 切块内存缓存/落库
 │  ├─ mcpSync.ts           应用数据 → server/data 自动同步（供 MCP/CLI）
 │  ├─ files.ts             文件管理归档、按名称/地址检索、去重
@@ -69,7 +69,7 @@ answermaker/
       ├─ mcp.rs            本机 MCP 服务控制：状态/启停/Token 轮换/协议自检、局域网地址与数据量
       ├─ ollama.rs         本地 Ollama 检测 / winget 安装 / 启动 / 模型拉取 / 硬件推荐
       ├─ agent.rs          本地 Agent CLI 探测与非交互执行（CodeMaker / Claude / Codex / Gemini）
-      └─ vault_crypto.rs   Argon2id + AES-256-GCM 信封加密设计（桌面端目标，函数体仍为占位，见下）
+      └─ vault_crypto.rs   Argon2id + AES-256-GCM 信封加密（已实现并接线：会话 KEK 只存 Rust 内存；待 Windows cargo check）
 ```
 
 ## 运行前端预览（无需 Rust）
@@ -340,7 +340,7 @@ popo-cli auth login     # 浏览器 OpenID 登录（CLI 自动打开浏览器）
 ## V0.2 已实现（真实功能）
 
 - **保险库真实加密（WebCrypto 版）**：首次进入设置主密码，PBKDF2-SHA256（210,000 次迭代，随机 salt）派生 AES-GCM 256 密钥；每条目 value 独立随机 IV 加密，type=account 时 account 同样加密，之后才写入本地 SQLite——落盘只有密文（自查与序列化检查均未发现明文 value/account，解密往返正确）。解锁/锁定流程完整：密钥只存内存变量，锁定即清除；密码错误有明确报错（校验块解密校验）。列表仍只显示 `vault://<key>/<type>` 引用与掩码，点「复制」需已解锁 + 确认授权，复制内容为该条目的 JSON 源数据（含 id 与五个字段），明文不上屏。每条目支持「改名」：可修改 key（平台名/详细类型）、type、url，value/account 密文保持不变；vault:// 引用会随 key/type 更新。
-  - 与 PRD 桌面端口径的差异：桌面端（Rust）最终用 **Argon2id** 派生；WebCrypto 没有 Argon2id，故浏览器版用 PBKDF2-SHA256 替代。加密算法（AES-256-GCM）、每条目独立 IV、密钥只存内存等语义与 PRD §14 一致。
+  - 桌面端 Rust **Argon2id** 已实现并接线：密文带 `cryptoVer` 标记（`web-pbkdf2` / `rust-argon2id`），解密按标记分发（双读），桌面端新写入优先 Rust（单写），存量 PBKDF2 密文不强制迁移、编辑重存时自然升级；整库 Rust 主格式仅在桌面端首次建库时产生，浏览器预览打不开这类保险库（会明确报错）。
   - **旧数据迁移**：检测到 V0.1 明文 `am_vault` 时，保险库顶部出现提示横幅，提供「一键迁移（重新加密后删除明文，并自动自查无明文残留）」或「清空旧数据」，不会静默丢失；V0.1 的知识库模拟文档则自动降级为「仅登记」并注明原因。
 - **知识库真实入库与本地搜索**：拖入/选择 `.txt/.md/.csv/.json/.html` 时用 `File.text()` 真实读取正文（HTML 自动去标签），按段落优先、约 512 字符、重叠 80 真实切块，切块正文写入 SQLite 的 `chunks` 表；本地搜索与 RAG 模式走真实 BM25 检索，返回真实命中片段、标注来源文档名，搜索结果高亮关键词；RAG 回退回答直接引用检索到的片段原文。
   - KM 文章与 POPO 文档链接经 `popo-cli`（OpenID 鉴权）真实拉取正文，再走同一套切块 + BM25 入库流程，可直接被本地搜索 / RAG 使用。
@@ -371,7 +371,7 @@ popo-cli auth login     # 浏览器 OpenID 登录（CLI 自动打开浏览器）
 
 ## V0.2 未实现（如实标注）
 
-- **Rust 原生**：已在本机编译通过（`cargo check` / `tauri dev`）；`vault_crypto.rs` 的 Argon2id 实现仍为占位（桌面端加密以 WebCrypto 版为当前可用实现）
+- **Rust 原生**：已在本机编译通过（`cargo check` / `tauri dev`）；`vault_crypto.rs` 的 Argon2id 实现已接线（本次改动在本机无 cargo 环境下完成，新增命令待下一次 Windows `cargo check` 复核）
 - **Word 解析**：拖入 .docx 只登记元数据并明确提示，不切块（PDF 已支持文本层解析，见 V0.4）
 - **在线文档**：KM / POPO 文档已经 popo-cli 真实读取并按链接手动入库；其他域名仍仅登记（受 CORS/鉴权限制）；内容/权限/删除的自动同步（ETag/版本校验）未实现
 - **云端向量库**：仅预留接口，界面标注「待开发」，不实现、不上传
