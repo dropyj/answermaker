@@ -24,6 +24,7 @@
     "tauri": "tauri",
     "mcp:start": "node server/mcp-server.mjs",
     "mcp:smoke": "node scripts/mcp-smoke.mjs",
+    "sync:check": "node scripts/sync-server-check.mjs",
     "cli": "node cli/answermaker.mjs"
   },
   "type": "module",

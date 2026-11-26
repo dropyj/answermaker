@@ -3,9 +3,10 @@ import type { Account, CalEvent, Note, Project, ProjectLink, SystemEntry, Todo }
 import { call, isTauri } from "../bridge";
 import { decryptAllItems, isUnlocked } from "../crypto";
 import {
-  buildSyncPackage, checkSyncPassphrase, getDevice, loadSyncSettings, openSyncPackage,
+  buildSyncPackage, checkServerHealth, checkSyncPassphrase, getDevice, listServerPackages,
+  loadSyncSettings, openSyncPackage, pullFromServer, pushToServer,
   saveSyncSettings, setDeviceName, setSyncPassphrase, SYNC_FILENAME,
-  type SyncChannel, type SyncPayload, type SyncSettings,
+  type ServerPackageInfo, type SyncChannel, type SyncPayload, type SyncSettings,
 } from "../sync";
 
 export interface SyncData {
@@ -18,7 +19,7 @@ export interface SyncData {
   accounts: Account[];
 }
 
-/** 设置页「跨设备同步」区：零知识加密同步包 + 三类通道（服务器端点待部署，仅预留配置）。 */
+/** 设置页「跨设备同步」区：零知识加密同步包 + 三类通道（文件夹 / 同步盘 / 服务器端点，均已实现）。 */
 export default function SyncPanel({ data, onMerge }: {
   data: SyncData;
   onMerge: (payload: SyncPayload) => Promise<string>;
@@ -30,7 +31,11 @@ export default function SyncPanel({ data, onMerge }: {
   const [importPass, setImportPass] = useState("");
   const [msg, setMsg] = useState("");
   const [error, setError] = useState("");
+  const [serverBusy, setServerBusy] = useState("");
+  const [serverPkgs, setServerPkgs] = useState<ServerPackageInfo[] | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  const serverConfigured = settings.serverEndpoint.trim() !== "" && settings.serverToken.trim() !== "";
 
   const save = (next: SyncSettings) => { setSettings(next); saveSyncSettings(next); };
 
@@ -112,6 +117,55 @@ export default function SyncPanel({ data, onMerge }: {
     } catch (e) { setError(`读取同步包失败：${e instanceof Error ? e.message : String(e)}`); }
   };
 
+  /* ---- 服务器端点通道 ---- */
+
+  const doHealth = async () => {
+    setError(""); setMsg(""); setServerBusy("health");
+    try {
+      const h = await checkServerHealth();
+      setMsg(`服务器连接正常：${h.service} v${h.version}（${settings.serverEndpoint.trim()}）`);
+    } catch (e) { setError(e instanceof Error ? e.message : "连接测试失败"); }
+    finally { setServerBusy(""); }
+  };
+
+  const doPush = async () => {
+    setError(""); setMsg("");
+    if (!settings.verifier) { setError("请先设置同步口令"); return; }
+    if (!(await checkSyncPassphrase(pass))) { setError("同步口令不正确（在上方输入框输入当前口令后再推送）"); return; }
+    setServerBusy("push");
+    try {
+      const payload = await buildPayload();
+      const text = await buildSyncPackage(payload, pass);
+      const r = await pushToServer(text); // 内部断言密文格式，绝不上传明文
+      const result = `版本 v${r.version} · ${r.size} 字节 · 服务器时间 ${new Date(r.updatedAt).toLocaleString()}`;
+      save({ ...loadSyncSettings(), lastSyncAt: Date.now(), lastSyncFrom: device.name, lastPushAt: Date.now(), lastPushMsg: result });
+      setSettings(loadSyncSettings());
+      setMsg(`已推送加密同步包到服务器：${result}（保险库${payload.vault ? `含 ${payload.vault.length} 条条目` : "未解锁，本次未包含"}）。服务器只保存密文。`);
+    } catch (e) { setError(e instanceof Error ? e.message : "推送失败"); }
+    finally { setServerBusy(""); }
+  };
+
+  const doPull = async () => {
+    setError(""); setMsg("");
+    if (!importPass) { setError("请输入拉取用的同步口令（下方「导入用同步口令」输入框）"); return; }
+    setServerBusy("pull");
+    try {
+      const payload = await pullFromServer(importPass);
+      const summary = await onMerge(payload);
+      save({ ...loadSyncSettings(), lastSyncAt: Date.now(), lastSyncFrom: payload.deviceName, lastPullAt: Date.now(), lastPullMsg: `来源「${payload.deviceName}」：${summary}` });
+      setSettings(loadSyncSettings());
+      setMsg(`已从服务器拉取并合并（来源设备「${payload.deviceName}」）：${summary}`);
+    } catch (e) { setError(e instanceof Error ? e.message : "拉取失败"); }
+    finally { setServerBusy(""); }
+  };
+
+  const doListPkgs = async () => {
+    setError(""); setMsg(""); setServerBusy("list");
+    try { setServerPkgs(await listServerPackages()); }
+    catch (e) { setError(e instanceof Error ? e.message : "读取服务器版本列表失败"); }
+    finally { setServerBusy(""); }
+  };
+
   return (
     <div className="card">
       <h3>跨设备同步（零知识加密）</h3>
@@ -136,19 +190,59 @@ export default function SyncPanel({ data, onMerge }: {
         <select value={settings.channel} onChange={(e) => save({ ...settings, channel: e.target.value as SyncChannel })}>
           <option value="folder">通道：本地文件夹（已实现）</option>
           <option value="sync-drive">通道：同步盘 / Git 文件夹（同一机制，选网盘/Git 目录即可）</option>
-          <option value="server">通道：自托管服务器端点（待部署，仅预留配置）</option>
+          <option value="server">通道：自托管服务器端点（已实现）</option>
         </select>
         {settings.channel !== "server" && (
           <input placeholder="同步文件夹路径，如 D:\\Cloud\\AnswerMaker 或 ~/git/answermaker-sync" value={settings.folderPath} onChange={(e) => save({ ...settings, folderPath: e.target.value })} />
         )}
         {settings.channel === "server" && (
           <>
-            <input placeholder="服务器端点 URL（待部署预留，如 https://sync.example.com）" value={settings.serverEndpoint} onChange={(e) => save({ ...settings, serverEndpoint: e.target.value })} />
-            <input placeholder="设备 Token（待部署预留，服务器配对后填入）" value={settings.serverToken} onChange={(e) => save({ ...settings, serverToken: e.target.value })} />
-            <p className="hint">服务器端点尚未部署：本批只预留配置字段，不做上传。部署后服务器也只保存 .amsync 密文包，保持零知识。</p>
+            <input placeholder="服务器端点 URL，如 http://111.230.147.240:7362" value={settings.serverEndpoint} onChange={(e) => save({ ...settings, serverEndpoint: e.target.value })} />
+            <input type="password" placeholder="设备 Token（与服务器配对的 Bearer Token，只存本机）" value={settings.serverToken} onChange={(e) => save({ ...settings, serverToken: e.target.value })} />
+            <p className="hint">
+              服务器只保存 .amsync 密文包与版本元信息，保持零知识。当前端点走 HTTP 明文通道：链路上传输的只有密文包，
+              但<strong>设备 Token 在链路上明文可见</strong>，请只在可信网络使用；HTTPS 需要域名与证书，列为待办。
+              设备 Token 只存本机浏览器存储，不进同步包。
+            </p>
           </>
         )}
       </div>
+
+      {settings.channel === "server" && (
+        <div style={{ marginTop: 10 }}>
+          <div className="row">
+            <button disabled={settings.serverEndpoint.trim() === "" || serverBusy !== ""} onClick={() => void doHealth()}>
+              {serverBusy === "health" ? "测试中…" : "连接测试"}
+            </button>
+            <button disabled={!serverConfigured || serverBusy !== ""} onClick={() => void doPush()}>
+              {serverBusy === "push" ? "推送中…" : "立即推送到服务器"}
+            </button>
+            <button disabled={!serverConfigured || serverBusy !== ""} onClick={() => void doPull()}>
+              {serverBusy === "pull" ? "拉取中…" : "从服务器拉取并合并"}
+            </button>
+            <button disabled={!serverConfigured || serverBusy !== ""} onClick={() => void doListPkgs()}>
+              {serverBusy === "list" ? "读取中…" : "刷新服务器版本列表"}
+            </button>
+          </div>
+          {!serverConfigured && <p className="hint">填好端点 URL 与设备 Token 后，推送 / 拉取 / 版本列表按钮才可用（连接测试只需端点）。推送用上方同步口令校验，拉取用下方「导入用同步口令」。</p>}
+          <p className="dim">
+            上次推送：{settings.lastPushAt ? `${new Date(settings.lastPushAt).toLocaleString()}（${settings.lastPushMsg}）` : "尚未推送"}
+            <br />
+            上次拉取：{settings.lastPullAt ? `${new Date(settings.lastPullAt).toLocaleString()}（${settings.lastPullMsg}）` : "尚未拉取"}
+          </p>
+          {serverPkgs !== null && (
+            serverPkgs.length === 0
+              ? <p className="dim">服务器上暂无同步包。</p>
+              : (
+                <ul className="dim" style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+                  {serverPkgs.map((p) => (
+                    <li key={p.version}>v{p.version} · 设备「{p.deviceName}」 · {new Date(p.updatedAt).toLocaleString()} · {p.size} 字节</li>
+                  ))}
+                </ul>
+              )
+          )}
+        </div>
+      )}
 
       <div className="row">
         <button onClick={() => void doExport()}>立即导出同步包</button>

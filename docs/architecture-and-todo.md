@@ -314,7 +314,7 @@ am audit tail [n]
 - [x] MCP smoke 20/20（POPO 22/22）；Rust 密钥写入单测；`npm run build` 通过
 - [x] **项目空间 + 系统导航 + 全局命令面板**（WF1）：projects/entity_links/systems 表；项目聚合文档/文件/密钥/系统/笔记/待办，删除只解关联；导航卡片一键打开/复制凭据（走保险库解锁 + 30 秒清剪贴板）；Ctrl+K/Cmd+K 命令面板聚合 BM25/文件/保险库引用/系统/项目/笔记/待办；聊天命中系统返回系统卡片
 - [x] **笔记/待办/日程 + 今日简报 + MCP 写工具**（WF2）：「事务」三 Tab；聊天智能创建（中文相对日期解析器，自查 8/8）；今日简报卡；MCP 新增 7 工具（共 23），写工具经 ingest 队列应用落库闭环；CLI notes/todos/events；smoke 37/37
-- [x] **跨设备加密同步 + 密钥健康 + 加密附件**（WF3）：.amsync 零知识同步包（独立同步口令 PBKDF2+AES-GCM，文件头无明文；Node 自查 4/4）；通道三类——本地文件夹（已实现）、同步盘/Git 文件夹（同机制）、自托管服务器端点（标「待部署」，仅预留 endpoint+设备 Token 配置，不做上传）；按 id+updatedAt 合并、保险库按本地主密码重加密；expiresAt/env/lastUsedAt 健康标注（7 天黄/过期红，简报汇总）；加密附件（会话密钥，≤5MB，MCP 只标 hasAttachment）
+- [x] **跨设备加密同步 + 密钥健康 + 加密附件**（WF3）：.amsync 零知识同步包（独立同步口令 PBKDF2+AES-GCM，文件头无明文；Node 自查 4/4）；通道三类——本地文件夹（已实现）、同步盘/Git 文件夹（同机制）、自托管服务器端点（已实现：客户端按契约接通 PUT /package、GET /package/latest、GET /packages、GET /health，设备 Token Bearer 鉴权，推送前断言包体为加密格式拒绝明文，拉取走既有解密+合并；Node mock server 自查 13/13）；按 id+updatedAt 合并、保险库按本地主密码重加密；expiresAt/env/lastUsedAt 健康标注（7 天黄/过期红，简报汇总）；加密附件（会话密钥，≤5MB，MCP 只标 hasAttachment）
 - [x] **PDF 正文解析**（WF4）：pdfjs-dist 本地打包 worker；逐页抽文本层真实入库，状态「已入库（PDF 解析，N 页）」；无文本层明确提示「未抽到文本（可能是扫描件）」仅登记；Node 实测抽取通过。Word(.docx) 仍仅登记
 - [x] **账号隔离**（WF5）：accounts 表与三类 kind 分组管理；旧 POPO 数据迁移补 accountId 到默认账号「网易 POPO（工作）」；导入前选当前账号、列表徽标与按账号筛选；断开只清该账号（可选移除其文档，默认保留）；聊天/search_all/knowledge_search 结果带账号标注；MCP 在线工具可选 accountId 且审计带 accountId；CLI --account。隔离自查 6/6（迁移/筛选/断开互不影响）。**边界：POPO 会话由 popo-cli 统一托管，多账号会话隔离受 CLI 限制**（数据层隔离已实现，会话层不假装）
 - [x] **V0.3 安全组第一批**：MCP 默认本机绑定 + 局域网显式开关与 CORS 收敛（server_status/health 带 bind/lan）；多客户端 Token 与撤销（tokens.json 热加载，CLI 与面板可管理）；密钥取用/鉴权审计（audit.log JSONL + 面板最近 20 条 + CLI audit tail）；剪贴板 30 秒比对后自动清空；保险库闲置 5 分钟自动锁定（可关）；MCP smoke 扩至 28/28
@@ -384,7 +384,7 @@ am audit tail [n]
 - `vault_crypto.rs`、`vault_*`/`knowledge_ingest`/`chat_send` 为旧桩
 - Word/Excel 不解析正文（PDF 已支持文本层；扫描版 PDF 无文本层仅登记）
 - POPO 多账号**会话**隔离受 popo-cli 限制：登录态由 CLI 统一托管，应用只做数据归属/筛选/断开/审计层隔离
-- 同步的自托管服务器端点未部署：仅预留配置字段；浏览器预览下文件夹同步降级为手动导出/导入文件
+- 同步服务器通道当前走 HTTP 明文：只传 .amsync 密文包（零知识不变），但设备 Token 在链路上明文可见，只建议可信网络使用；HTTPS 需域名/证书，列为待办。浏览器预览下文件夹同步降级为手动导出/导入文件
 - 本批新增 Rust 命令（db_save_projects/links/systems/notes/todos/events/accounts/vault_attachments、mcp_ingest_pending/ack、write_text_file、read_binary_file_base64）未在 VM 编译（无 cargo），需 Windows cargo check
 - 在线文档仅 KM/POPO 可读；非 KM/POPO 域名仅登记
 - BM25 为关键词检索，无 embedding
