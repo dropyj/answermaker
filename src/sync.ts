@@ -314,7 +314,7 @@ export async function checkServerHealth(): Promise<ServerHealth> {
  * 密码只出现在登录/注册请求体里，绝不落盘；成功后只把会话 Token 与账号邮箱存本地设置。
  */
 
-export interface SyncAccountUser { id: string; email: string }
+export interface SyncAccountUser { id: string; email: string; role?: string }
 export interface AuthSession { token: string; user: SyncAccountUser; expiresAt: string }
 
 const AUTH_ERROR_TEXT: Record<string, string> = {
@@ -393,6 +393,33 @@ export async function fetchMe(): Promise<SyncAccountUser> {
     saveSyncSettings({ ...loadSyncSettings(), accountEmail: j.user.email });
   }
   return j.user;
+}
+
+/* ================= 邀请码（仅管理员） =================
+ * 服务端只存邀请码哈希，生成时明文只返回这一次；列表只回创建时间与使用状态。
+ */
+
+export interface InviteInfo { createdAt: string; usedBy: string | null }
+
+/** 生成一次性邀请码（管理员会话）：返回的 code 只出现这一次，请立即复制保存。 */
+export async function createInvite(): Promise<{ code: string; createdAt: string }> {
+  const res = await serverFetch("/auth/invites", { method: "POST" });
+  if (!res.ok) {
+    const { code } = await readServerError(res);
+    throw new SyncServerError(code === "admin_only" ? "仅管理员可生成邀请码" : `生成邀请码失败（HTTP ${res.status}）`, res.status, code);
+  }
+  return (await res.json()) as { code: string; createdAt: string };
+}
+
+/** 邀请码列表（管理员会话）：只有创建时间与使用状态，没有明文码。 */
+export async function listInvites(): Promise<InviteInfo[]> {
+  const res = await serverFetch("/auth/invites");
+  if (!res.ok) {
+    const { code } = await readServerError(res);
+    throw new SyncServerError(code === "admin_only" ? "仅管理员可查看邀请码" : `读取邀请码列表失败（HTTP ${res.status}）`, res.status, code);
+  }
+  const j = (await res.json()) as { invites: InviteInfo[] };
+  return j.invites ?? [];
 }
 
 /**

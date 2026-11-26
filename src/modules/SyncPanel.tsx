@@ -1,12 +1,12 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Account, CalEvent, Note, Project, ProjectLink, SystemEntry, Todo } from "../types";
 import { call, isTauri } from "../bridge";
 import { decryptAllItems, isUnlocked } from "../crypto";
 import {
-  buildSyncPackage, checkServerHealth, checkSyncPassphrase, fetchMe, getDevice, listServerPackages,
+  buildSyncPackage, checkServerHealth, checkSyncPassphrase, createInvite, fetchMe, getDevice, listInvites, listServerPackages,
   loadSyncSettings, login, logout, openSyncPackage, pullFromServer, pushToServer, register,
   saveSyncSettings, setDeviceName, setSyncPassphrase, SYNC_FILENAME, SyncServerError,
-  type ServerPackageInfo, type SyncChannel, type SyncPayload, type SyncSettings,
+  type InviteInfo, type ServerPackageInfo, type SyncChannel, type SyncPayload, type SyncSettings,
 } from "../sync";
 
 export interface SyncData {
@@ -41,7 +41,28 @@ export default function SyncPanel({ data, onMerge }: {
   const [authBusy, setAuthBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [invites, setInvites] = useState<InviteInfo[] | null>(null);
+  const [newInvite, setNewInvite] = useState("");
+  const [inviteBusy, setInviteBusy] = useState(false);
+
   const loggedIn = settings.sessionToken.trim() !== "";
+
+  // 登录态变化时确认管理员身份（只有管理员才显示邀请码面板）
+  useEffect(() => {
+    if (!loggedIn) { setIsAdmin(false); setInvites(null); setNewInvite(""); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const me = await fetchMe();
+        if (cancelled) return;
+        const admin = me.role === "admin";
+        setIsAdmin(admin);
+        if (admin) { try { const list = await listInvites(); if (!cancelled) setInvites(list); } catch { /* 列表失败不影响同步功能 */ } }
+      } catch { if (!cancelled) setIsAdmin(false); }
+    })();
+    return () => { cancelled = true; };
+  }, [loggedIn, settings.sessionToken]);
   // 推送/拉取/版本列表可用条件：已登录，或填了高级兼容的手动设备 Token
   const serverUsable = loggedIn || settings.serverToken.trim() !== "";
 
@@ -175,6 +196,21 @@ export default function SyncPanel({ data, onMerge }: {
     } finally { setAuthBusy(false); }
   };
 
+  const doCreateInvite = async () => {
+    setError(""); setMsg(""); setInviteBusy(true);
+    try {
+      const r = await createInvite();
+      setNewInvite(r.code);
+      try { setInvites(await listInvites()); } catch { /* 列表刷新失败不影响已生成的码 */ }
+    } catch (e) { setError(e instanceof Error ? e.message : "生成邀请码失败"); }
+    finally { setInviteBusy(false); }
+  };
+
+  const doCopyInvite = async () => {
+    try { await navigator.clipboard.writeText(newInvite); setMsg("邀请码已复制到剪贴板。"); }
+    catch { setError("复制失败，请手动选中邀请码复制"); }
+  };
+
   const doPush = async () => {
     setError(""); setMsg("");
     if (!settings.verifier) { setError("请先设置同步口令"); return; }
@@ -281,6 +317,37 @@ export default function SyncPanel({ data, onMerge }: {
               服务器只保存 .amsync 密文包与版本元信息，保持零知识；同步包按<strong>登录账号隔离存储</strong>，不同账号互不可见。
               默认端点为官方服务（HTTPS）；也可改成自建端点。账号密码不落盘，只保存会话 Token 于本机浏览器存储，不进同步包。
             </p>
+            {loggedIn && isAdmin && (
+              <div className="invite-panel span-all">
+                <div className="invite-head">
+                  <strong>邀请码管理（管理员）</strong>
+                  <button disabled={inviteBusy} onClick={() => void doCreateInvite()}>{inviteBusy ? "生成中…" : "生成邀请码"}</button>
+                </div>
+                {newInvite && (
+                  <div className="invite-new">
+                    <code>{newInvite}</code>
+                    <button onClick={() => void doCopyInvite()}>复制</button>
+                    <span className="dim">只显示这一次，关闭面板后无法再看；用过即作废</span>
+                  </div>
+                )}
+                {invites === null
+                  ? <p className="dim">邀请码列表读取中…</p>
+                  : invites.length === 0
+                    ? <p className="dim">还没有生成过邀请码。生成后把码给对方，对方注册时填写即可。</p>
+                    : (
+                      <ul className="invite-list">
+                        {invites.map((iv, i) => (
+                          <li key={`${iv.createdAt}-${i}`}>
+                            <span>{new Date(iv.createdAt).toLocaleString()}</span>
+                            {iv.usedBy
+                              ? <span className="dim">已被 {iv.usedBy} 使用</span>
+                              : <span className="invite-unused">未使用</span>}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+              </div>
+            )}
           </>
         )}
       </div>

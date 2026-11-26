@@ -189,7 +189,7 @@ const server = http.createServer(async (req, res) => {
     writeJson(usersFile(), users);
     const { token, expiresAt } = createSession(user.id, String(req.headers['x-device-name'] || ''));
     audit({ event: 'register', email });
-    return json(res, 200, { token, user: { id: user.id, email: user.email }, expiresAt });
+    return json(res, 200, { token, user: { id: user.id, email: user.email, role: user.role || 'user' }, expiresAt });
   }
 
   if (req.method === 'POST' && url.pathname === '/auth/login') {
@@ -208,7 +208,7 @@ const server = http.createServer(async (req, res) => {
     loginFails.delete(key);
     const { token, expiresAt } = createSession(user.id, String(req.headers['x-device-name'] || ''));
     audit({ event: 'login', email });
-    return json(res, 200, { token, user: { id: user.id, email: user.email }, expiresAt });
+    return json(res, 200, { token, user: { id: user.id, email: user.email, role: user.role || 'user' }, expiresAt });
   }
 
   if (req.method === 'POST' && url.pathname === '/auth/logout') {
@@ -223,7 +223,29 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && url.pathname === '/auth/me') {
     const client = authClient(req);
     if (!client || client.type !== 'session') return json(res, 401, { error: 'unauthorized' });
-    return json(res, 200, { user: { id: client.user.id, email: client.user.email } });
+    return json(res, 200, { user: { id: client.user.id, email: client.user.email, role: client.user.role || 'user' } });
+  }
+
+  // ----- invite codes (admin only) -----
+  if (req.method === 'POST' && url.pathname === '/auth/invites') {
+    const client = authClient(req);
+    if (!client || client.type !== 'session') return json(res, 401, { error: 'unauthorized' });
+    if (client.user.role !== 'admin') return json(res, 403, { error: 'admin_only' });
+    const code = 'AM-' + crypto.randomBytes(6).toString('hex').toUpperCase();
+    const invites = loadInvites();
+    const createdAt = new Date().toISOString();
+    invites.push({ codeHash: sha256(code), createdAt, usedBy: null });
+    writeJson(invitesFile(), invites);
+    audit({ event: 'invite_create', email: client.user.email });
+    return json(res, 200, { code, createdAt }); // code shown once; server stores only its hash
+  }
+  if (req.method === 'GET' && url.pathname === '/auth/invites') {
+    const client = authClient(req);
+    if (!client || client.type !== 'session') return json(res, 401, { error: 'unauthorized' });
+    if (client.user.role !== 'admin') return json(res, 403, { error: 'admin_only' });
+    const invites = loadInvites().map(i => ({ createdAt: i.createdAt, usedBy: i.usedBy || null }));
+    invites.reverse();
+    return json(res, 200, { invites });
   }
 
   // ----- packages (session or legacy device token) -----
