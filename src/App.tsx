@@ -3,6 +3,10 @@ import type { ReactNode } from "react";
 import Vault from "./modules/Vault";
 import Knowledge from "./modules/Knowledge";
 import Files from "./modules/Files";
+import Projects, { type SectionKey } from "./modules/Projects";
+import Systems, { SystemHitCard } from "./modules/Systems";
+import CommandPalette from "./modules/CommandPalette";
+import { searchSystems } from "./systems";
 import FileHitCard from "./modules/FileHitCard";
 import Mcp from "./modules/Mcp";
 import Settings from "./modules/Settings";
@@ -15,17 +19,19 @@ import { tokenize, chunkText, saveChunks } from "./search";
 import { call, isTauri } from "./bridge";
 import { installMcpSync, scheduleMcpSync } from "./mcpSync";
 import { isMcpFollowMain } from "./mcpPrefs";
-import { loadAppData, saveDocs as saveDocsDb, saveFiles as saveFilesDb } from "./db";
+import { loadAppData, saveDocs as saveDocsDb, saveFiles as saveFilesDb, saveProjects as saveProjectsDb, saveLinks as saveLinksDb, saveSystems as saveSystemsDb } from "./db";
 import { initChunks } from "./search";
 import { initVaultStore } from "./crypto";
-import type { AgentCli, ChatMessage, ChatMode, FileEntry, KnowledgeDoc, ModelId, OllamaStatus, SearchHit, SecretRequest, VaultHit } from "./types";
+import type { AgentCli, ChatMessage, ChatMode, FileEntry, KnowledgeDoc, ModelId, OllamaStatus, Project, ProjectLink, SearchHit, SecretRequest, SystemEntry, VaultHit } from "./types";
 
-type Section = "chat" | "vault" | "knowledge" | "files" | "mcp" | "settings";
+type Section = SectionKey;
 const NAV: { id: Section; label: string; icon: string }[] = [
   { id: "chat", label: "聊天", icon: "fa-comment-dots" },
   { id: "vault", label: "保险库", icon: "fa-shield-halved" },
   { id: "knowledge", label: "知识库", icon: "fa-book-open" },
   { id: "files", label: "文件管理", icon: "fa-folder-open" },
+  { id: "systems", label: "系统导航", icon: "fa-compass" },
+  { id: "projects", label: "项目", icon: "fa-diagram-project" },
   { id: "mcp", label: "MCP 网关", icon: "fa-plug" },
   { id: "settings", label: "设置", icon: "fa-gear" },
 ];
@@ -164,6 +170,16 @@ export default function App() {
   const [section, setSection] = useState<Section>("chat");
   const [docs, setDocs] = useState<KnowledgeDoc[]>([]);
   const [files, setFiles] = useState<FileEntry[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [links, setLinks] = useState<ProjectLink[]>([]);
+  const [systems, setSystems] = useState<SystemEntry[]>([]);
+  const [focusId, setFocusId] = useState<string | null>(null);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+
+  const go = useCallback((next: SectionKey, focus?: string) => {
+    setSection(next);
+    setFocusId(focus ?? null);
+  }, []);
   const [ready, setReady] = useState(false);
   const [bootError, setBootError] = useState("");
   const [model, setModel] = useState<ModelId>("ollama");
@@ -200,6 +216,9 @@ export default function App() {
         if (!alive) return;
         setDocs(restored);
         setFiles(snap.files);
+        setProjects(snap.projects);
+        setLinks(snap.links);
+        setSystems(snap.systems);
         setReady(true);
       } catch (e) {
         if (alive) {
@@ -234,6 +253,30 @@ export default function App() {
     if (!ready || bootError) return;
     void saveFilesDb(files).catch(() => {});
   }, [files, ready, bootError]);
+  useEffect(() => {
+    if (!ready || bootError) return;
+    void saveProjectsDb(projects).catch(() => {});
+  }, [projects, ready, bootError]);
+  useEffect(() => {
+    if (!ready || bootError) return;
+    void saveLinksDb(links).catch(() => {});
+  }, [links, ready, bootError]);
+  useEffect(() => {
+    if (!ready || bootError) return;
+    void saveSystemsDb(systems).catch(() => {});
+  }, [systems, ready, bootError]);
+
+  // 全局命令面板：Ctrl+K / Cmd+K
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   // 知识库/文件变化后自动同步到 server/data，保证 MCP 与聊天检索数据一致。
   useEffect(() => { installMcpSync(); }, []);
@@ -308,7 +351,7 @@ export default function App() {
       } catch (e) {
         vaultError = String(e);
       }
-      setMessages([...history, searchReply(q, docs, vaultHits, locked, vaultError, searchFiles(q, files))]);
+      setMessages([...history, searchReply(q, docs, vaultHits, locked, vaultError, searchFiles(q, files), searchSystems(q, systems))]);
       return;
     }
 
@@ -329,6 +372,13 @@ export default function App() {
       const originOf = (h: SearchHit) => docs.find((d) => d.id === h.docId)?.origin;
       contextParts.push(hits.map((h) => `《${h.docName}》片段 ${h.chunkIndex + 1}（来源：${originOf(h) ?? "未记录"}）：${h.text}`).join("\n---\n"));
     }
+    const systemHits = searchSystems(q, systems);
+    if (systemHits.length > 0) {
+      contextParts.push(
+        "系统导航匹配（可打开网址；凭据需用户在卡片中自行复制，勿编造）：\n" +
+        systemHits.map((x) => `- ${x.name}（${x.url}）：${x.description}`).join("\n"),
+      );
+    }
     const fileHits = searchFiles(q, files);
     if (fileHits.length > 0) {
       contextParts.push(
@@ -345,6 +395,7 @@ export default function App() {
     const context = contextParts.join("\n\n");
     const sources = [
       ...new Set([
+        ...systemHits.map((x) => x.name),
         ...fileHits.map((f) => f.name),
         ...vaultHits.map((h) => `vault://${h.key}/${h.type.replace(/\s/g, "-")}`),
         ...hits.map((h) => h.docName),
@@ -366,6 +417,7 @@ export default function App() {
         const text = await call<string>("agent_run", { agent, prompt });
         setMessages([...history, {
           role: "assistant", kind: mode, text,
+          systemHits: systemHits.length ? systemHits : undefined,
           hits: hits.length ? hits : undefined,
           vaultHits: vaultHits.length ? vaultHits : undefined,
           fileHits: fileHits.length ? fileHits : undefined,
@@ -385,6 +437,7 @@ export default function App() {
         const text = await ollamaChat(ollamaModel, history, context || undefined);
         setMessages([...history, {
           role: "assistant", kind: mode, text,
+          systemHits: systemHits.length ? systemHits : undefined,
           hits: hits.length ? hits : undefined,
           vaultHits: vaultHits.length ? vaultHits : undefined,
           fileHits: fileHits.length ? fileHits : undefined,
@@ -400,6 +453,7 @@ export default function App() {
         setMessages([...history, {
           ...fallback,
           kind: "chat",
+          systemHits: systemHits.length ? systemHits : undefined,
           vaultHits: vaultHits.length ? vaultHits : undefined,
           fileHits: fileHits.length ? fileHits : undefined,
           vaultLocked: vaultLocked || undefined,
@@ -418,6 +472,7 @@ export default function App() {
     setMessages([...history, {
       ...fallback,
       kind: "chat",
+      systemHits: systemHits.length ? systemHits : undefined,
       vaultHits: vaultHits.length ? vaultHits : undefined,
       fileHits: fileHits.length ? fileHits : undefined,
       vaultLocked: vaultLocked || undefined,
@@ -461,9 +516,11 @@ export default function App() {
           s.models.includes(prev) || s.models.includes(`${prev}:latest`) ? prev : s.recommended_model
         )} />
 
-        {section === "vault" && <Vault secretReqs={secretReqs} onRefreshSecrets={refreshSecretReqs} />}
-        {section === "knowledge" && <Knowledge docs={docs} setDocs={setDocs} files={files} setFiles={setFiles} />}
-        {section === "files" && <Files files={files} setFiles={setFiles} docs={docs} />}
+        {section === "vault" && <Vault secretReqs={secretReqs} onRefreshSecrets={refreshSecretReqs} projects={projects} links={links} setLinks={setLinks} focusId={focusId} />}
+        {section === "knowledge" && <Knowledge docs={docs} setDocs={setDocs} files={files} setFiles={setFiles} projects={projects} links={links} setLinks={setLinks} focusId={focusId} />}
+        {section === "files" && <Files files={files} setFiles={setFiles} docs={docs} projects={projects} links={links} setLinks={setLinks} focusId={focusId} />}
+        {section === "systems" && <Systems systems={systems} setSystems={setSystems} projects={projects} links={links} setLinks={setLinks} focusId={focusId} />}
+        {section === "projects" && <Projects projects={projects} setProjects={setProjects} links={links} setLinks={setLinks} docs={docs} files={files} systems={systems} notes={[]} todos={[]} go={go} />}
         {section === "mcp" && <Mcp />}
         {section === "settings" && <Settings />}
         {section === "chat" && (
@@ -474,6 +531,11 @@ export default function App() {
                   <div key={i} id={`msg-${i}`} className={m.role === "user" ? "msg user" : "msg assistant"}>
                     {m.role === "user" && m.kind && <div className="msg-kind">{KIND_LABEL[m.kind]}</div>}
                     <div>{m.text}</div>
+                    {m.systemHits && m.systemHits.length > 0 && (
+                      <div className="file-hits">
+                        {m.systemHits.map((x) => <SystemHitCard key={x.id} sys={x} />)}
+                      </div>
+                    )}
                     {m.fileHits && m.fileHits.length > 0 && (
                       <div className="file-hits">
                         {m.fileHits.map((f) => <FileHitCard key={f.id} entry={f} />)}
@@ -578,6 +640,7 @@ export default function App() {
           </div>
         )}
       </main>
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} docs={docs} files={files} systems={systems} projects={projects} notes={[]} todos={[]} go={go} />
       {secretReqs.length > 0 && section !== "vault" && (
         <button className="secret-toast" onClick={() => setSection("vault")}>
           <i className="fa-solid fa-key" aria-hidden="true" />

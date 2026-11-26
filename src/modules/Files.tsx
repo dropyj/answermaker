@@ -4,7 +4,9 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { isTauri } from "../bridge";
 import { upsertFile } from "../files";
 import { uid } from "../types";
-import type { FileEntry, FileKind, KnowledgeDoc } from "../types";
+import type { FileEntry, FileKind, KnowledgeDoc, Project, ProjectLink } from "../types";
+import ProjectPicker from "./ProjectPicker";
+import { useEffect } from "react";
 import FileHitCard from "./FileHitCard";
 
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
@@ -14,11 +16,23 @@ export default function Files({
   files,
   setFiles,
   docs,
+  projects = [],
+  links: projLinks = [],
+  setLinks,
+  focusId,
 }: {
   files: FileEntry[];
   setFiles: Dispatch<SetStateAction<FileEntry[]>>;
   docs: KnowledgeDoc[];
+  projects?: Project[];
+  links?: ProjectLink[];
+  setLinks?: (next: ProjectLink[]) => void;
+  focusId?: string | null;
 }) {
+  useEffect(() => {
+    if (!focusId) return;
+    document.querySelector(`[data-focus="${CSS.escape(focusId)}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [focusId, files]);
   const [filter, setFilter] = useState("");
   const [kind, setKind] = useState<"all" | "file" | "link">("all");
   const [groupTab, setGroupTab] = useState<GroupKey>("rag");
@@ -194,12 +208,13 @@ export default function Files({
           ) : (
             <ul className="list">
               {activeGroup.items.map((f) => (
-                <li key={f.id}>
+                <li key={f.id} data-focus={f.id}>
                   <FileHitCard
                     entry={f}
                     docName={docs.find((d) => d.id === f.docId)?.name}
                     onDelete={() => setFiles((prev) => prev.filter((x) => x.id !== f.id))}
                   />
+                  {setLinks && <ProjectPicker projects={projects} links={projLinks} entityType="file" entityId={f.id} setLinks={setLinks} />}
                 </li>
               ))}
             </ul>

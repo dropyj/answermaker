@@ -1,4 +1,4 @@
-import type { ChatMessage, ChatMode, FileEntry, KnowledgeDoc, ModelId, SearchHit, VaultHit } from "../types";
+import type { ChatMessage, ChatMode, FileEntry, KnowledgeDoc, ModelId, SearchHit, SystemEntry, VaultHit } from "../types";
 import { bm25Search } from "../search";
 
 export const MODELS: { id: ModelId; label: string }[] = [
@@ -27,10 +27,12 @@ export function searchReply(
   vaultLocked = false,
   vaultError = "",
   fileHits: FileEntry[] = [],
+  systemHits: SystemEntry[] = [],
 ): ChatMessage {
   const hits = retrieve(q, docs);
   const secretHits = vaultHits.filter((h) => h.matchedSecret).length;
   const parts: string[] = [];
+  if (systemHits.length > 0) parts.push(`系统导航命中 ${systemHits.length} 条`);
   if (fileHits.length > 0) parts.push(`文件/链接名称命中 ${fileHits.length} 条`);
   if (vaultHits.length > 0) {
     parts.push(`保险库命中 ${vaultHits.length} 条${secretHits > 0 ? `（其中 ${secretHits} 条命中密码内容）` : ""}`);
@@ -49,8 +51,10 @@ export function searchReply(
     hits: hits.length ? hits : undefined,
     vaultHits: vaultHits.length ? vaultHits : undefined,
     fileHits: fileHits.length ? fileHits : undefined,
+    systemHits: systemHits.length ? systemHits : undefined,
     sources: [
       ...new Set([
+        ...systemHits.map((x) => x.name),
         ...fileHits.map((f) => f.name),
         ...vaultHits.map((h) => `vault://${h.key}/${h.type.replace(/\s/g, "-")}`),
         ...hits.map((h) => h.docName),

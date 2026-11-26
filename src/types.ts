@@ -25,6 +25,7 @@ export interface KnowledgeDoc {
   size?: number; // 源文件字节数（本地文件）
   origin?: string; // 原始文件绝对路径或在线链接（溯源用）
   importedAt?: number; // 导入时间戳（毫秒）
+  accountId?: string; // 在线来源所属授权账号（WF5）；本地文件为空
 }
 
 /** POPO 团队空间。 */
@@ -73,6 +74,7 @@ export interface FileEntry {
   importedAt: number;
   size?: number;
   status?: DocStatus;
+  accountId?: string; // 在线来源所属授权账号（WF5）；本地文件为空
 }
 
 /** MCP 密钥临时取用请求（只在应用内展示，不含明文）。 */
@@ -145,6 +147,100 @@ export interface AgentCli {
   available: boolean;
 }
 
+/** 项目空间：跨模块的组织维度，实体通过 ProjectLink 关联（可多属）。 */
+export interface Project {
+  id: string;
+  name: string;
+  description: string;
+  color: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type ProjectEntityType = "doc" | "file" | "vault" | "link" | "system" | "note" | "todo";
+export interface ProjectLink {
+  id: string;
+  entityType: ProjectEntityType;
+  entityId: string;
+  projectId: string;
+}
+
+/** 系统导航条目：常用 Web 系统/应用的地址簿，可关联保险库条目一键复制凭据。 */
+export interface SystemEntry {
+  id: string;
+  name: string;
+  url: string;
+  description: string; // 功能一句话
+  keywords: string; // 搜索关键词（空格分隔）
+  projectIds: string[];
+  vaultItemId?: string; // 关联的保险库条目 id（加密条目）
+  iconUrl?: string;
+  accountId?: string; // 在线系统所属授权账号（WF5）；本地/无账号为空
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** 速记笔记（WF2）。 */
+export interface Note {
+  id: string;
+  title: string;
+  content: string;
+  createdAt: number;
+  updatedAt: number;
+  projectId?: string;
+  pinned?: boolean;
+}
+
+/** 待办（WF2）。 */
+export interface Todo {
+  id: string;
+  title: string;
+  dueAt?: number;
+  priority: "high" | "normal" | "low";
+  status: "todo" | "done";
+  projectId?: string;
+  source?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** 日程（WF2）。 */
+export interface CalEvent {
+  id: string;
+  title: string;
+  startAt: number;
+  endAt?: number;
+  note?: string;
+  projectId?: string;
+  remindMin?: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * 授权账号（WF5）：个人云账号与在线文档授权账号严格隔离管理。
+ * popo 会话由 popo-cli 统一托管（见 docs 的隔离边界说明）。
+ */
+export type AccountKind = "popo" | "personal-cloud" | "doc-source";
+export interface Account {
+  id: string;
+  kind: AccountKind;
+  provider: string; // netease-popo | google | notion | feishu | webdav | custom
+  label: string;
+  identity: string; // 账号显示名/邮箱，未知可空
+  status: "connected" | "disconnected";
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** 聊天智能创建的回执（WF2）。 */
+export interface CreatedItemRef {
+  kind: "note" | "todo" | "event";
+  id: string;
+  title: string;
+  when?: string;
+}
+
 export interface ChatMessage {
   role: "user" | "assistant";
   text: string;
@@ -152,6 +248,8 @@ export interface ChatMessage {
   hits?: SearchHit[];
   vaultHits?: VaultHit[];
   fileHits?: FileEntry[];
+  systemHits?: SystemEntry[];
+  createdItems?: CreatedItemRef[];
   kind?: ChatMode; // 该轮对话的模式：聊天 / RAG / 本地搜索
   vaultLocked?: boolean; // 本轮匹配时保险库处于锁定状态
 }

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import type { SecretRequest, VaultItem, VaultType } from "../types";
+import type { Project, ProjectLink, SecretRequest, VaultItem, VaultType } from "../types";
+import ProjectPicker from "./ProjectPicker";
 import { vaultRef } from "../types";
 import { call } from "../bridge";
 import {
@@ -37,9 +38,17 @@ const SCAN_CANDIDATES: Candidate[] = [
 export default function Vault({
   secretReqs = [],
   onRefreshSecrets,
+  projects = [],
+  links = [],
+  setLinks,
+  focusId,
 }: {
   secretReqs?: SecretRequest[];
   onRefreshSecrets?: () => void;
+  projects?: Project[];
+  links?: ProjectLink[];
+  setLinks?: (next: ProjectLink[]) => void;
+  focusId?: string | null;
 }) {
   const [hasMeta, setHasMeta] = useState(() => hasVaultMeta());
   const [unlocked, setUnlocked] = useState(() => isUnlocked());
@@ -63,6 +72,10 @@ export default function Vault({
 
   const refresh = () => { setEncItems(listEncItems()); setHasMeta(hasVaultMeta()); setLegacy(readLegacyItems()); };
   useEffect(() => { refresh(); }, []);
+  useEffect(() => {
+    if (!focusId) return;
+    document.querySelector(`[data-focus="${CSS.escape(focusId)}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [focusId, encItems]);
 
   const changeAutoLock = (enabled: boolean) => {
     setAutoLock(enabled);
@@ -321,12 +334,13 @@ export default function Vault({
       <ul className="list">
         {encItems.map((i) => {
           return (
-            <li key={i.id} className="card">
+            <li key={i.id} className="card" data-focus={i.id}>
               <div><strong>{i.key}</strong> <span className="badge">{i.type}</span></div>
               <div className="mono">{vaultRef(i)}</div>
               {i.type === "account" && <div>账号：••••••••（已加密） · 绑定 URL：{i.url}</div>}
               {i.url && i.type !== "account" && <div className="mono dim">{i.url}</div>}
               <div className="mono" title="明文不上屏，仅在复制时于本地解密并写入剪贴板">••••••••（AES-GCM 密文存储）</div>
+              {setLinks && <ProjectPicker projects={projects} links={links} entityType="vault" entityId={i.id} setLinks={setLinks} />}
               {editingId === i.id ? (
                 <div className="editbox">
                   <div className="form">

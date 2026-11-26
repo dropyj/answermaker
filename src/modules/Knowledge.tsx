@@ -4,7 +4,8 @@ import { useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { call, isTauri } from "../bridge";
-import type { FileEntry, KnowledgeDoc, LinkReadResult } from "../types";
+import type { FileEntry, KnowledgeDoc, LinkReadResult, Project, ProjectLink } from "../types";
+import ProjectPicker from "./ProjectPicker";
 import { uid } from "../types";
 import { chunkText, deleteChunks, getChunks, saveChunks } from "../search";
 import { removeFilesByDoc, upsertFile } from "../files";
@@ -24,11 +25,15 @@ function stripHtml(html: string): string {
 
 const clip = (text: string, n = 120) => (text.length > n ? `${text.slice(0, n)}…` : text);
 
-export default function Knowledge({ docs, setDocs, files, setFiles }: {
+export default function Knowledge({ docs, setDocs, files, setFiles, projects = [], links = [], setLinks, focusId }: {
   docs: KnowledgeDoc[];
   setDocs: Dispatch<SetStateAction<KnowledgeDoc[]>>;
   files: FileEntry[];
   setFiles: Dispatch<SetStateAction<FileEntry[]>>;
+  projects?: Project[];
+  links?: ProjectLink[];
+  setLinks?: (next: ProjectLink[]) => void;
+  focusId?: string | null;
 }) {
   const [url, setUrl] = useState("");
   const [linkName, setLinkName] = useState("");
@@ -41,6 +46,10 @@ export default function Knowledge({ docs, setDocs, files, setFiles }: {
   const timers = useRef<number[]>([]);
   const fileInput = useRef<HTMLInputElement>(null);
   useEffect(() => () => timers.current.forEach(clearTimeout), []);
+  useEffect(() => {
+    if (!focusId) return;
+    document.querySelector(`[data-focus="${CSS.escape(focusId)}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [focusId, docs]);
 
   const animateStages = (id: string, realChunks: number) => {
     STAGE_FLOW.forEach((stage, idx) => {
@@ -325,7 +334,7 @@ export default function Knowledge({ docs, setDocs, files, setFiles }: {
       </div>
       <ul className="list">
         {docs.map((d) => (
-          <li key={d.id} className="card">
+          <li key={d.id} className="card" data-focus={d.id}>
             <div><strong>{d.name}</strong> <span className="badge">{d.source}</span>
               {d.status === "indexed"
                 ? <span className="badge">已入库（真实切块）</span>
@@ -352,6 +361,7 @@ export default function Knowledge({ docs, setDocs, files, setFiles }: {
                 <pre className="pre bodypre">{d.content}</pre>
               </details>
             )}
+            {setLinks && <ProjectPicker projects={projects} links={links} entityType="doc" entityId={d.id} setLinks={setLinks} />}
             {editingOriginId === d.id ? (
               <div className="row" style={{ margin: 0 }}>
                 <input

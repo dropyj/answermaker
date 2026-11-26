@@ -4,7 +4,7 @@
 // localStorage 原始键保留作为备份，之后所有读写都以 SQLite 为准。
 
 import { call, isTauri } from "./bridge";
-import type { FileEntry, KnowledgeDoc } from "./types";
+import type { Account, CalEvent, FileEntry, KnowledgeDoc, Note, Project, ProjectLink, SystemEntry, Todo } from "./types";
 
 export type VaultSnapshot = { meta: unknown | null; items: unknown[] };
 
@@ -13,6 +13,14 @@ export type DbSnapshot = {
   files: FileEntry[];
   chunks: Record<string, string[]>;
   vault: VaultSnapshot;
+  projects: Project[];
+  links: ProjectLink[];
+  systems: SystemEntry[];
+  notes: Note[];
+  todos: Todo[];
+  events: CalEvent[];
+  accounts: Account[];
+  attachments: unknown[];
   migrated: boolean;
 };
 
@@ -22,6 +30,14 @@ const KEYS = {
   files: "am_files",
   vaultMeta: "am_vault_v2_meta",
   vaultItems: "am_vault_v2_items",
+  projects: "am_projects",
+  links: "am_links",
+  systems: "am_systems",
+  notes: "am_notes",
+  todos: "am_todos",
+  events: "am_events",
+  accounts: "am_accounts",
+  attachments: "am_vault_attachments",
 };
 
 function read<T>(key: string, fallback: T): T {
@@ -62,6 +78,14 @@ function localSnapshot(): DbSnapshot {
       meta: read<unknown | null>(KEYS.vaultMeta, null),
       items: read<unknown[]>(KEYS.vaultItems, []),
     },
+    projects: read<Project[]>(KEYS.projects, []),
+    links: read<ProjectLink[]>(KEYS.links, []),
+    systems: read<SystemEntry[]>(KEYS.systems, []),
+    notes: read<Note[]>(KEYS.notes, []),
+    todos: read<Todo[]>(KEYS.todos, []),
+    events: read<CalEvent[]>(KEYS.events, []),
+    accounts: read<Account[]>(KEYS.accounts, []),
+    attachments: read<unknown[]>(KEYS.attachments, []),
     migrated: true,
   };
 }
@@ -73,6 +97,14 @@ async function importLocal(snap: DbSnapshot) {
   }
   await call("db_save_files", { files: snap.files });
   await call("db_save_vault", { meta: snap.vault.meta, items: snap.vault.items });
+  await call("db_save_projects", { items: snap.projects });
+  await call("db_save_links", { items: snap.links });
+  await call("db_save_systems", { items: snap.systems });
+  await call("db_save_notes", { items: snap.notes });
+  await call("db_save_todos", { items: snap.todos });
+  await call("db_save_events", { items: snap.events });
+  await call("db_save_accounts", { items: snap.accounts });
+  await call("db_save_vault_attachments", { items: snap.attachments });
   await call("db_mark_migrated");
 }
 
@@ -91,7 +123,13 @@ export function loadAppData(): Promise<DbSnapshot> {
         local.files.length > 0 ||
         Object.keys(local.chunks).length > 0 ||
         local.vault.meta !== null ||
-        local.vault.items.length > 0;
+        local.vault.items.length > 0 ||
+        local.projects.length > 0 ||
+        local.systems.length > 0 ||
+        local.notes.length > 0 ||
+        local.todos.length > 0 ||
+        local.events.length > 0 ||
+        local.accounts.length > 0;
       if (hasLocal) {
         // 以 localStorage 备份为准重新导入（幂等），避免上次迁移中断造成半份数据。
         await importLocal(local);
@@ -166,8 +204,31 @@ export async function deleteChunks(docId: string) {
   await call("db_delete_chunks", { docId });
 }
 
+/** 通用整表保存（projects/links/systems/notes/todos/events/accounts/attachments 共用）。 */
+function makeSaver<T>(key: string, cmd: string) {
+  return async (items: T[]) => {
+    if (!isTauri()) {
+      localStorage.setItem(key, JSON.stringify(items));
+      return;
+    }
+    await call(cmd, { items });
+  };
+}
+
+export const saveProjects = makeSaver<Project>(KEYS.projects, "db_save_projects");
+export const saveLinks = makeSaver<ProjectLink>(KEYS.links, "db_save_links");
+export const saveSystems = makeSaver<SystemEntry>(KEYS.systems, "db_save_systems");
+export const saveNotes = makeSaver<Note>(KEYS.notes, "db_save_notes");
+export const saveTodos = makeSaver<Todo>(KEYS.todos, "db_save_todos");
+export const saveEvents = makeSaver<CalEvent>(KEYS.events, "db_save_events");
+export const saveAccounts = makeSaver<Account>(KEYS.accounts, "db_save_accounts");
+export const saveAttachments = makeSaver<unknown>(KEYS.attachments, "db_save_vault_attachments");
+
 /** 存储信息（设置页展示 SQLite 路径与数据量）。 */
-export type DbInfo = { path: string; docs: number; chunks: number; files: number; vaultItems: number };
+export type DbInfo = {
+  path: string; docs: number; chunks: number; files: number; vaultItems: number;
+  projects?: number; systems?: number; notes?: number; todos?: number; events?: number; accounts?: number;
+};
 
 export async function dbInfo(): Promise<DbInfo | null> {
   if (!isTauri()) return null;

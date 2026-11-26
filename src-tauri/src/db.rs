@@ -50,6 +50,45 @@ CREATE TABLE IF NOT EXISTS vault_items (
   data TEXT NOT NULL,
   created_at INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS projects (
+  id TEXT PRIMARY KEY,
+  data TEXT NOT NULL,
+  created_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS entity_links (
+  id TEXT PRIMARY KEY,
+  data TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS systems (
+  id TEXT PRIMARY KEY,
+  data TEXT NOT NULL,
+  created_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS notes (
+  id TEXT PRIMARY KEY,
+  data TEXT NOT NULL,
+  created_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS todos (
+  id TEXT PRIMARY KEY,
+  data TEXT NOT NULL,
+  created_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS events (
+  id TEXT PRIMARY KEY,
+  data TEXT NOT NULL,
+  created_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS accounts (
+  id TEXT PRIMARY KEY,
+  data TEXT NOT NULL,
+  created_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS vault_attachments (
+  id TEXT PRIMARY KEY,
+  data TEXT NOT NULL,
+  created_at INTEGER NOT NULL DEFAULT 0
+);
 "#;
 
 pub struct DbState(pub Mutex<Connection>);
@@ -66,8 +105,86 @@ pub struct DbSnapshot {
     pub files: Vec<Value>,
     pub chunks: BTreeMap<String, Vec<String>>,
     pub vault: VaultSnapshot,
+    pub projects: Vec<Value>,
+    pub links: Vec<Value>,
+    pub systems: Vec<Value>,
+    pub notes: Vec<Value>,
+    pub todos: Vec<Value>,
+    pub events: Vec<Value>,
+    pub accounts: Vec<Value>,
+    pub attachments: Vec<Value>,
     pub migrated: bool,
 }
+
+/// 读取一张「id + data(JSON)」整行存表（projects/links/systems/notes/… 共用）。
+fn load_table(conn: &Connection, table: &str) -> Result<Vec<Value>, String> {
+    let mut out = Vec::new();
+    let mut st = conn
+        .prepare(&format!("SELECT data FROM {table} ORDER BY rowid"))
+        .map_err(|e| e.to_string())?;
+    let rows = st
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    for row in rows {
+        out.push(parse(row.map_err(|e| e.to_string())?));
+    }
+    Ok(out)
+}
+
+/// 整表替换一张「id + data(JSON)」表；`ts_field` 为行内的时间戳字段名（可选）。
+fn save_table(
+    conn: &mut Connection,
+    table: &str,
+    items: &[Value],
+    ts_field: Option<&str>,
+) -> Result<(), String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    tx.execute(&format!("DELETE FROM {table}"), [])
+        .map_err(|e| e.to_string())?;
+    {
+        let sql = match ts_field {
+            Some(_) => format!("INSERT INTO {table}(id, data, created_at) VALUES(?1, ?2, ?3)"),
+            None => format!("INSERT INTO {table}(id, data) VALUES(?1, ?2)"),
+        };
+        let mut st = tx.prepare(&sql).map_err(|e| e.to_string())?;
+        for item in items {
+            let id = item["id"]
+                .as_str()
+                .ok_or_else(|| format!("{table} 条目缺少 id"))?;
+            if let Some(field) = ts_field {
+                let ts = item[field].as_i64().unwrap_or(0);
+                st.execute(params![id, item.to_string(), ts])
+                    .map_err(|e| e.to_string())?;
+            } else {
+                st.execute(params![id, item.to_string()])
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())
+}
+
+macro_rules! save_cmd {
+    ($name:ident, $table:literal, $ts:expr) => {
+        #[tauri::command]
+        pub fn $name(
+            state: tauri::State<'_, DbState>,
+            items: Vec<Value>,
+        ) -> Result<(), String> {
+            let mut conn = lock(&state)?;
+            save_table(&mut conn, $table, &items, $ts)
+        }
+    };
+}
+
+save_cmd!(db_save_projects, "projects", Some("createdAt"));
+save_cmd!(db_save_links, "entity_links", None);
+save_cmd!(db_save_systems, "systems", Some("createdAt"));
+save_cmd!(db_save_notes, "notes", Some("createdAt"));
+save_cmd!(db_save_todos, "todos", Some("createdAt"));
+save_cmd!(db_save_events, "events", Some("createdAt"));
+save_cmd!(db_save_accounts, "accounts", Some("createdAt"));
+save_cmd!(db_save_vault_attachments, "vault_attachments", Some("createdAt"));
 
 pub fn open() -> Result<Connection, String> {
     let dir = crate::data_dir();
@@ -169,6 +286,14 @@ pub fn db_load_all(state: tauri::State<'_, DbState>) -> Result<DbSnapshot, Strin
         .unwrap_or(false);
 
     Ok(DbSnapshot {
+        projects: load_table(&conn, "projects")?,
+        links: load_table(&conn, "entity_links")?,
+        systems: load_table(&conn, "systems")?,
+        notes: load_table(&conn, "notes")?,
+        todos: load_table(&conn, "todos")?,
+        events: load_table(&conn, "events")?,
+        accounts: load_table(&conn, "accounts")?,
+        attachments: load_table(&conn, "vault_attachments")?,
         docs,
         files,
         chunks,
@@ -326,5 +451,11 @@ pub fn db_info(state: tauri::State<'_, DbState>) -> Result<Value, String> {
         "chunks": count("chunks"),
         "files": count("files"),
         "vaultItems": count("vault_items"),
+        "projects": count("projects"),
+        "systems": count("systems"),
+        "notes": count("notes"),
+        "todos": count("todos"),
+        "events": count("events"),
+        "accounts": count("accounts"),
     }))
 }
