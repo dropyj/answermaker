@@ -409,6 +409,35 @@ export async function changePassword(currentPassword: string, newPassword: strin
   }
 }
 
+/* ================= 登录设备 / 会话管理（项5） =================
+ * 服务端契约：GET /auth/sessions -> {sessions:[{id, deviceName, createdAt,
+ * expiresAt, current}]}（绝不回 token/hash）；DELETE /auth/sessions/:id 吊销，
+ * 吊销当前会话返回 403 {error:'cannot_revoke_current'}。
+ */
+
+export interface ServerSessionInfo { id: string; deviceName: string; createdAt: string; expiresAt: string; current: boolean }
+
+/** 本账号的登录设备列表（会话），当前设备带 current 标记。 */
+export async function listSessions(): Promise<ServerSessionInfo[]> {
+  const res = await serverFetch("/auth/sessions");
+  if (!res.ok) throw new SyncServerError(`读取登录设备失败：${(await readServerError(res)).message}`, res.status);
+  const j = (await res.json()) as { sessions: ServerSessionInfo[] };
+  return j.sessions ?? [];
+}
+
+/** 踢下线：吊销指定会话（不能吊销当前会话，服务端会拒绝）。 */
+export async function revokeSession(id: string): Promise<void> {
+  const res = await serverFetch(`/auth/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (!res.ok) {
+    const { code } = await readServerError(res);
+    throw new SyncServerError(
+      code === "cannot_revoke_current" ? "不能踢下线当前设备（退出登录请用「退出登录」）"
+        : code === "session_not_found" ? "该会话已不存在，请刷新列表"
+          : `踢下线失败（HTTP ${res.status}）`,
+      res.status, code);
+  }
+}
+
 /* ================= 邀请码（仅管理员） =================
  * 服务端只存邀请码哈希，生成时明文只返回这一次；列表只回创建时间与使用状态。
  */

@@ -15,6 +15,8 @@
 //   POST /auth/login      {email, password}              -> {token, user, expiresAt}
 //   POST /auth/logout     (Bearer session)
 //   GET  /auth/me         (Bearer session)
+//   GET  /auth/sessions   (Bearer session) -> {sessions:[{id, deviceName, createdAt, expiresAt, current}]}
+//   DELETE /auth/sessions/:id  (Bearer session; revoking the current one -> 403 cannot_revoke_current)
 //   PUT  /package         (Bearer)  body = .amsync JSON, X-Device-Id / X-Device-Name headers
 //   GET  /package/latest  (Bearer)
 //   GET  /packages        (Bearer)  last 10 versions of the caller's namespace
@@ -119,7 +121,7 @@ function createSession(userId, deviceName) {
   const token = 'amsess_' + crypto.randomBytes(24).toString('base64url');
   const expiresAt = new Date(Date.now() + SESSION_DAYS * 86400 * 1000).toISOString();
   const sessions = loadSessions().filter(s => new Date(s.expiresAt) > new Date());
-  sessions.push({ tokenHash: sha256(token), userId, deviceName: deviceName || '', createdAt: new Date().toISOString(), expiresAt });
+  sessions.push({ id: crypto.randomUUID(), tokenHash: sha256(token), userId, deviceName: deviceName || '', createdAt: new Date().toISOString(), expiresAt });
   writeJson(sessionsFile(), sessions);
   return { token, expiresAt };
 }
@@ -159,7 +161,7 @@ function saveIndex(ns, list) { writeJson(path.join(pkgDir(ns), 'index.json'), li
 
 function cors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, PUT, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, PUT, POST, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Device-Id, X-Device-Name');
   res.setHeader('Access-Control-Expose-Headers', 'X-Package-Version, X-Package-Updated-At, X-Package-Device');
 }
@@ -241,6 +243,42 @@ const server = http.createServer(async (req, res) => {
     const client = authClient(req);
     if (!client || client.type !== 'session') return json(res, 401, { error: 'unauthorized' });
     return json(res, 200, { user: { id: client.user.id, email: client.user.email, role: client.user.role || 'user' } });
+  }
+
+  // ----- session / device management -----
+  if (req.method === 'GET' && url.pathname === '/auth/sessions') {
+    const client = authClient(req);
+    if (!client || client.type !== 'session') return json(res, 401, { error: 'unauthorized' });
+    const h = req.headers['authorization'] || '';
+    const currentHash = sha256(h.startsWith('Bearer ') ? h.slice(7) : '');
+    // Lazy-migrate pre-id sessions so they can be listed and revoked too.
+    let sessions = loadSessions();
+    let changed = false;
+    sessions = sessions.map(s => {
+      if (s.userId === client.user.id && !s.id) { changed = true; return { ...s, id: crypto.randomUUID() }; }
+      return s;
+    });
+    if (changed) writeJson(sessionsFile(), sessions);
+    const mine = sessions
+      .filter(s => s.userId === client.user.id && new Date(s.expiresAt) > new Date())
+      .map(s => ({ id: s.id, deviceName: s.deviceName || '', createdAt: s.createdAt, expiresAt: s.expiresAt, current: s.tokenHash === currentHash }))
+      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+    return json(res, 200, { sessions: mine });
+  }
+
+  if (req.method === 'DELETE' && url.pathname.startsWith('/auth/sessions/')) {
+    const client = authClient(req);
+    if (!client || client.type !== 'session') return json(res, 401, { error: 'unauthorized' });
+    const id = decodeURIComponent(url.pathname.slice('/auth/sessions/'.length));
+    const h = req.headers['authorization'] || '';
+    const currentHash = sha256(h.startsWith('Bearer ') ? h.slice(7) : '');
+    const sessions = loadSessions();
+    const target = sessions.find(s => s.userId === client.user.id && s.id === id);
+    if (!target) return json(res, 404, { error: 'session_not_found' });
+    if (target.tokenHash === currentHash) return json(res, 403, { error: 'cannot_revoke_current' });
+    writeJson(sessionsFile(), sessions.filter(s => s !== target));
+    audit({ event: 'session_revoke', email: client.user.email, device: target.deviceName || '' });
+    return json(res, 200, { ok: true });
   }
 
   if (req.method === 'POST' && url.pathname === '/auth/change-password') {

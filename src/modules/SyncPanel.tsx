@@ -3,10 +3,10 @@ import type { Account, CalEvent, Note, Project, ProjectLink, SystemEntry, Todo }
 import { call, isTauri } from "../bridge";
 import { decryptAllItems, isUnlocked } from "../crypto";
 import {
-  buildSyncPackage, changePassword, checkServerHealth, checkSyncPassphrase, createInvite, fetchMe, getDevice, listInvites, listServerPackages,
-  loadSyncSettings, login, logout, openSyncPackage, pullFromServer, pushToServer, register,
+  buildSyncPackage, changePassword, checkServerHealth, checkSyncPassphrase, createInvite, fetchMe, getDevice, listInvites, listServerPackages, listSessions,
+  loadSyncSettings, login, logout, openSyncPackage, pullFromServer, pushToServer, register, revokeSession,
   saveSyncSettings, setDeviceName, setSyncPassphrase, SYNC_FILENAME, SyncServerError,
-  type InviteInfo, type ServerPackageInfo, type SyncChannel, type SyncPayload, type SyncSettings,
+  type InviteInfo, type ServerPackageInfo, type ServerSessionInfo, type SyncChannel, type SyncPayload, type SyncSettings,
 } from "../sync";
 
 export interface SyncData {
@@ -49,12 +49,31 @@ export default function SyncPanel({ data, onMerge }: {
   const [invites, setInvites] = useState<InviteInfo[] | null>(null);
   const [newInvite, setNewInvite] = useState("");
   const [inviteBusy, setInviteBusy] = useState(false);
+  // 登录设备（项5）：本账号的全部会话，可踢下线非当前设备
+  const [sessions, setSessions] = useState<ServerSessionInfo[] | null>(null);
+  const [sessionBusy, setSessionBusy] = useState(false);
+
+  const refreshSessions = async () => {
+    try { setSessions(await listSessions()); } catch { setSessions(null); }
+  };
+  const doRevokeSession = async (s: ServerSessionInfo) => {
+    if (!window.confirm(`确定把设备「${s.deviceName || "未命名设备"}」（登录于 ${new Date(s.createdAt).toLocaleString()}）踢下线？该设备将立即需要重新登录。`)) return;
+    setSessionBusy(true);
+    setError("");
+    try {
+      await revokeSession(s.id);
+      setMsg(`已踢下线设备「${s.deviceName || "未命名设备"}」。`);
+      await refreshSessions();
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    finally { setSessionBusy(false); }
+  };
 
   const loggedIn = settings.sessionToken.trim() !== "";
 
-  // 登录态变化时确认管理员身份（只有管理员才显示邀请码面板）
+  // 登录态变化时确认管理员身份（只有管理员才显示邀请码面板），并加载登录设备列表
   useEffect(() => {
-    if (!loggedIn) { setIsAdmin(false); setInvites(null); setNewInvite(""); return; }
+    if (!loggedIn) { setIsAdmin(false); setInvites(null); setNewInvite(""); setSessions(null); return; }
+    void refreshSessions();
     let cancelled = false;
     (async () => {
       try {
@@ -326,6 +345,30 @@ export default function SyncPanel({ data, onMerge }: {
                   <button disabled={authBusy} onClick={() => void doAuth()}>{authBusy ? "处理中…" : authMode === "login" ? "登录" : "注册并登录"}</button>
                 </div>
               </>
+            )}
+            {loggedIn && (
+              <div className="span-all">
+                <div className="row">
+                  <strong>登录设备</strong>
+                  <button disabled={sessionBusy} onClick={() => void refreshSessions()}>刷新</button>
+                </div>
+                {sessions === null && <p className="dim">设备列表加载失败或尚未加载（点「刷新」重试）。</p>}
+                {sessions !== null && sessions.length === 0 && <p className="dim">暂无其他登录会话。</p>}
+                <ul className="list">
+                  {(sessions ?? []).map((s) => (
+                    <li key={s.id} className="card">
+                      <div>
+                        <strong>{s.deviceName || "未命名设备"}</strong>
+                        {s.current && <span className="badge ok">当前设备</span>}
+                      </div>
+                      <div className="dim">登录于 {new Date(s.createdAt).toLocaleString()} · 会话到期 {new Date(s.expiresAt).toLocaleString()}</div>
+                      {!s.current && (
+                        <button disabled={sessionBusy} onClick={() => void doRevokeSession(s)}>踢下线</button>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </div>
             )}
             <details className="span-all">
               <summary className="dim">高级：手动 Token（兼容旧设备 Token，可不填）</summary>
