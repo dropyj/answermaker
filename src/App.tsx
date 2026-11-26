@@ -6,6 +6,11 @@ import Files from "./modules/Files";
 import Projects, { type SectionKey } from "./modules/Projects";
 import Systems, { SystemHitCard } from "./modules/Systems";
 import CommandPalette from "./modules/CommandPalette";
+import Tasks from "./modules/Tasks";
+import Briefing from "./modules/Briefing";
+import { parseCreationIntent } from "./dateParse";
+import { setAppExtras } from "./mcpSync";
+import { listEncItems } from "./crypto";
 import { searchSystems } from "./systems";
 import FileHitCard from "./modules/FileHitCard";
 import Mcp from "./modules/Mcp";
@@ -17,12 +22,13 @@ import { searchVault } from "./modules/vaultSearch";
 import { searchFiles } from "./files";
 import { tokenize, chunkText, saveChunks } from "./search";
 import { call, isTauri } from "./bridge";
+import { uid } from "./types";
 import { installMcpSync, scheduleMcpSync } from "./mcpSync";
 import { isMcpFollowMain } from "./mcpPrefs";
-import { loadAppData, saveDocs as saveDocsDb, saveFiles as saveFilesDb, saveProjects as saveProjectsDb, saveLinks as saveLinksDb, saveSystems as saveSystemsDb } from "./db";
+import { loadAppData, saveDocs as saveDocsDb, saveFiles as saveFilesDb, saveProjects as saveProjectsDb, saveLinks as saveLinksDb, saveSystems as saveSystemsDb, saveNotes as saveNotesDb, saveTodos as saveTodosDb, saveEvents as saveEventsDb } from "./db";
 import { initChunks } from "./search";
 import { initVaultStore } from "./crypto";
-import type { AgentCli, ChatMessage, ChatMode, FileEntry, KnowledgeDoc, ModelId, OllamaStatus, Project, ProjectLink, SearchHit, SecretRequest, SystemEntry, VaultHit } from "./types";
+import type { AgentCli, CalEvent, ChatMessage, ChatMode, FileEntry, KnowledgeDoc, ModelId, Note, OllamaStatus, Project, ProjectLink, SearchHit, SecretRequest, SystemEntry, Todo, VaultHit } from "./types";
 
 type Section = SectionKey;
 const NAV: { id: Section; label: string; icon: string }[] = [
@@ -32,6 +38,7 @@ const NAV: { id: Section; label: string; icon: string }[] = [
   { id: "files", label: "文件管理", icon: "fa-folder-open" },
   { id: "systems", label: "系统导航", icon: "fa-compass" },
   { id: "projects", label: "项目", icon: "fa-diagram-project" },
+  { id: "tasks", label: "事务", icon: "fa-list-check" },
   { id: "mcp", label: "MCP 网关", icon: "fa-plug" },
   { id: "settings", label: "设置", icon: "fa-gear" },
 ];
@@ -173,6 +180,9 @@ export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [links, setLinks] = useState<ProjectLink[]>([]);
   const [systems, setSystems] = useState<SystemEntry[]>([]);
+  const [notes, setNotes] = useState<Note[]>([]);
+  const [todos, setTodos] = useState<Todo[]>([]);
+  const [events, setEvents] = useState<CalEvent[]>([]);
   const [focusId, setFocusId] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
 
@@ -219,6 +229,9 @@ export default function App() {
         setProjects(snap.projects);
         setLinks(snap.links);
         setSystems(snap.systems);
+        setNotes(snap.notes);
+        setTodos(snap.todos);
+        setEvents(snap.events);
         setReady(true);
       } catch (e) {
         if (alive) {
@@ -265,6 +278,59 @@ export default function App() {
     if (!ready || bootError) return;
     void saveSystemsDb(systems).catch(() => {});
   }, [systems, ready, bootError]);
+  useEffect(() => {
+    if (!ready || bootError) return;
+    void saveNotesDb(notes).catch(() => {});
+  }, [notes, ready, bootError]);
+  useEffect(() => {
+    if (!ready || bootError) return;
+    void saveTodosDb(todos).catch(() => {});
+  }, [todos, ready, bootError]);
+  useEffect(() => {
+    if (!ready || bootError) return;
+    void saveEventsDb(events).catch(() => {});
+  }, [events, ready, bootError]);
+
+  // MCP 附加快照（systems/projects/notes/todos/events/accounts）随 knowledge.json 同步
+  useEffect(() => {
+    setAppExtras({ projects, links, systems, notes, todos, events, accounts: [] });
+    if (ready) scheduleMcpSync(docs, files);
+  }, [projects, links, systems, notes, todos, events, ready]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // MCP 写工具 ingest 队列：轮询 server 落盘的 notes/todos/events 写入请求，导入落库后 ack（真实闭环）
+  useEffect(() => {
+    if (!isTauri() || !ready) return;
+    let alive = true;
+    const poll = async () => {
+      try {
+        const pending = await call<Record<string, unknown>[]>("mcp_ingest_pending");
+        if (!alive || !pending.length) return;
+        const doneIds: string[] = [];
+        for (const req of pending) {
+          const id = String(req.id ?? "");
+          const kind = String(req.kind ?? "");
+          const now = Date.now();
+          if (kind === "note") {
+            const title = String(req.title ?? "（无标题）");
+            setNotes((prev) => prev.some((n) => n.id === id) ? prev : [{ id: id || uid(), title, content: String(req.content ?? title), createdAt: now, updatedAt: now }, ...prev]);
+          } else if (kind === "todo") {
+            setTodos((prev) => prev.some((t) => t.id === id) ? prev : [{ id: id || uid(), title: String(req.title ?? "（无标题待办）"), dueAt: typeof req.dueAt === "number" ? req.dueAt : undefined, priority: (["high", "normal", "low"].includes(String(req.priority)) ? req.priority : "normal") as Todo["priority"], status: "todo", source: "MCP", createdAt: now, updatedAt: now }, ...prev]);
+          } else if (kind === "todo_done") {
+            const tid = String(req.todoId ?? "");
+            setTodos((prev) => prev.map((t) => (t.id === tid ? { ...t, status: "done" as const, updatedAt: now } : t)));
+          } else if (kind === "event") {
+            const startAt = typeof req.startAt === "number" ? req.startAt : 0;
+            if (startAt > 0) setEvents((prev) => prev.some((e) => e.id === id) ? prev : [...prev, { id: id || uid(), title: String(req.title ?? "（无标题日程）"), startAt, endAt: typeof req.endAt === "number" ? req.endAt : undefined, note: typeof req.note === "string" ? req.note : undefined, createdAt: now, updatedAt: now }]);
+          }
+          if (id) doneIds.push(id);
+        }
+        if (doneIds.length) await call("mcp_ingest_ack", { ids: doneIds });
+      } catch { /* server 目录未就绪时静默，下一轮再试 */ }
+    };
+    const timer = window.setInterval(() => void poll(), 3000);
+    void poll();
+    return () => { alive = false; window.clearInterval(timer); };
+  }, [ready]);
 
   // 全局命令面板：Ctrl+K / Cmd+K
   useEffect(() => {
@@ -520,17 +586,33 @@ export default function App() {
         {section === "knowledge" && <Knowledge docs={docs} setDocs={setDocs} files={files} setFiles={setFiles} projects={projects} links={links} setLinks={setLinks} focusId={focusId} />}
         {section === "files" && <Files files={files} setFiles={setFiles} docs={docs} projects={projects} links={links} setLinks={setLinks} focusId={focusId} />}
         {section === "systems" && <Systems systems={systems} setSystems={setSystems} projects={projects} links={links} setLinks={setLinks} focusId={focusId} />}
-        {section === "projects" && <Projects projects={projects} setProjects={setProjects} links={links} setLinks={setLinks} docs={docs} files={files} systems={systems} notes={[]} todos={[]} go={go} />}
+        {section === "projects" && <Projects projects={projects} setProjects={setProjects} links={links} setLinks={setLinks} docs={docs} files={files} systems={systems} notes={notes} todos={todos} go={go} />}
+        {section === "tasks" && <Tasks notes={notes} setNotes={setNotes} todos={todos} setTodos={setTodos} events={events} setEvents={setEvents} projects={projects} focusId={focusId} />}
         {section === "mcp" && <Mcp />}
         {section === "settings" && <Settings />}
         {section === "chat" && (
           <div className="chatwrap">
             <div className="chatmain">
               <div className="chatlog" ref={chatlogRef}>
+                <Briefing events={events} todos={todos} notes={notes} expiringKeys={listEncItems().filter((i) => {
+                  const exp = (i as { expiresAt?: string }).expiresAt;
+                  if (!exp) return false;
+                  const t = new Date(exp).getTime();
+                  return !Number.isNaN(t) && t - Date.now() <= 7 * 86400000 && t >= Date.now() - 86400000;
+                }).length} goTasks={() => go("tasks")} />
                 {messages.map((m, i) => (
                   <div key={i} id={`msg-${i}`} className={m.role === "user" ? "msg user" : "msg assistant"}>
                     {m.role === "user" && m.kind && <div className="msg-kind">{KIND_LABEL[m.kind]}</div>}
                     <div>{m.text}</div>
+                    {m.createdItems && m.createdItems.length > 0 && (
+                      <div className="created-cards">
+                        {m.createdItems.map((c) => (
+                          <button key={c.id} className="badge" onClick={() => go("tasks", c.id)}>
+                            已创建{c.kind === "note" ? "速记" : c.kind === "todo" ? "待办" : "日程"}：{c.title}{c.when ? ` · ${c.when}` : ""}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                     {m.systemHits && m.systemHits.length > 0 && (
                       <div className="file-hits">
                         {m.systemHits.map((x) => <SystemHitCard key={x.id} sys={x} />)}
@@ -640,7 +722,7 @@ export default function App() {
           </div>
         )}
       </main>
-      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} docs={docs} files={files} systems={systems} projects={projects} notes={[]} todos={[]} go={go} />
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} docs={docs} files={files} systems={systems} projects={projects} notes={notes} todos={todos} go={go} />
       {secretReqs.length > 0 && section !== "vault" && (
         <button className="secret-toast" onClick={() => setSection("vault")}>
           <i className="fa-solid fa-key" aria-hidden="true" />

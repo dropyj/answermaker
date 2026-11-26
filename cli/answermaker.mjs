@@ -18,11 +18,14 @@
 //   answermaker token list                 列出客户端 Token（不显示值）
 //   answermaker token add <name>           新增客户端 Token（值只完整显示这一次）
 //   answermaker token revoke <name>        撤销某客户端 Token
+//   answermaker notes list / add <标题>    速记列表 / 新增（经 ingest 队列）
+//   answermaker todos list / add / done    待办列表 / 新增 / 完成（经 ingest 队列）
+//   answermaker events list / add          日程列表 / 新增（经 ingest 队列）
 //   answermaker audit tail [n]             查看最近 n 条审计记录（默认 20）
 // 数据文件可用环境变量 ANSWERMAKER_DATA_DIR 指向其他目录。
 
-import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { randomBytes, randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { networkInterfaces } from "node:os";
@@ -63,6 +66,22 @@ const loadFiles = () => {
   return Array.isArray(f.files) ? f.files : [];
 };
 const loadVaultRefs = () => loadJson("vault-refs.json", { refs: [] });
+const snapList = (key) => {
+  const k = loadKnowledge();
+  return Array.isArray(k[key]) ? k[key] : [];
+};
+/** 与 MCP 写工具同一条 ingest 队列：写请求文件，应用轮询导入落库。 */
+function queueIngest(entry) {
+  const dir = join(dataDir, "ingest-requests");
+  mkdirSync(dir, { recursive: true });
+  const id = randomUUID().slice(0, 8);
+  writeFileSync(join(dir, `${id}.json`), JSON.stringify({ id, createdAt: Date.now(), ...entry }, null, 2));
+  return id;
+}
+const accountFlag = (args) => {
+  const i = args.indexOf("--account");
+  return i >= 0 ? args[i + 1] : undefined;
+};
 
 function lanIp() {
   for (const infos of Object.values(networkInterfaces())) {
@@ -383,6 +402,55 @@ async function main() {
     return;
   }
 
+  if (cmd === "notes" && sub === "list") {
+    const notes = snapList("notes");
+    if (!notes.length) { console.log("（暂无速记；快照里还没有 notes，等待应用同步）"); return; }
+    for (const n of notes) console.log(`${n.pinned ? "📌 " : ""}${n.title}	${fmtTime(n.updatedAt)}`);
+    return;
+  }
+  if (cmd === "notes" && sub === "add") {
+    const title = rest.join(" ").trim();
+    if (!title) { console.error("用法：answermaker notes add <标题>"); process.exit(1); }
+    const id = queueIngest({ kind: "note", title, content: title, client: "cli" });
+    console.log(`已进入导入队列（id=${id}），AnswerMaker 应用运行中会自动落库。`);
+    return;
+  }
+  if (cmd === "todos" && sub === "list") {
+    const todos = snapList("todos").filter((t) => !rest.includes("--done") ? t.status === "todo" : true);
+    if (!todos.length) { console.log("（暂无待办）"); return; }
+    for (const t of todos) console.log(`[${t.status}] ${t.title}${t.dueAt ? `	截止=${fmtTime(t.dueAt)}` : ""}	${t.id}`);
+    return;
+  }
+  if (cmd === "todos" && sub === "add") {
+    const title = rest.join(" ").trim();
+    if (!title) { console.error("用法：answermaker todos add <标题>"); process.exit(1); }
+    const id = queueIngest({ kind: "todo", title, priority: "normal", client: "cli" });
+    console.log(`已进入导入队列（id=${id}），AnswerMaker 应用运行中会自动落库。`);
+    return;
+  }
+  if (cmd === "todos" && sub === "done") {
+    const id = rest.join(" ").trim();
+    if (!id) { console.error("用法：answermaker todos done <id>"); process.exit(1); }
+    queueIngest({ kind: "todo_done", todoId: id, client: "cli" });
+    console.log("已进入导入队列，应用会把该待办标记为已完成。");
+    return;
+  }
+  if (cmd === "events" && sub === "list") {
+    const events = [...snapList("events")].sort((a, b) => (a.startAt ?? 0) - (b.startAt ?? 0));
+    if (!events.length) { console.log("（暂无日程）"); return; }
+    for (const e of events) console.log(`${fmtTime(e.startAt)}	${e.title}`);
+    return;
+  }
+  if (cmd === "events" && sub === "add") {
+    const [when, ...titleParts] = rest;
+    const startAt = Date.parse(when ?? "");
+    const title = titleParts.join(" ").trim();
+    if (!startAt || !title) { console.error("用法：answermaker events add <ISO时间，如 2026-12-01T15:00> <标题>"); process.exit(1); }
+    const id = queueIngest({ kind: "event", title, startAt, client: "cli" });
+    console.log(`已进入导入队列（id=${id}），AnswerMaker 应用运行中会自动落库。`);
+    return;
+  }
+
   console.log(`AnswerMaker CLI
 用法：
   answermaker vault list                   列出保险库引用（不含明文）
@@ -402,6 +470,13 @@ async function main() {
   answermaker token list                    列出客户端 Token（名称/状态/最后使用，不显示值）
   answermaker token add <name>              新增客户端 Token（值只显示一次）
   answermaker token revoke <name>           撤销某客户端 Token
+  answermaker notes list                    列出速记
+  answermaker notes add <标题>              新增速记（经 ingest 队列由应用落库）
+  answermaker todos list [--done]           列出待办
+  answermaker todos add <标题>              新增待办（经 ingest 队列）
+  answermaker todos done <id>               完成待办（经 ingest 队列）
+  answermaker events list                   列出日程
+  answermaker events add <ISO时间> <标题>   新增日程（经 ingest 队列）
   answermaker audit tail [n]                查看最近 n 条审计记录（默认 20）`);
 }
 

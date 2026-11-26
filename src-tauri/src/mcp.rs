@@ -1130,3 +1130,47 @@ mod tests {
         std::env::remove_var("ANSWERMAKER_DATA_DIR");
     }
 }
+
+
+// ---------------- MCP 写工具 ingest 队列（notes/todos/events） ----------------
+// server 把 notes_add/todos_add/events_add 等写请求落成 ingest-requests/<id>.json，
+// 应用轮询 mcp_ingest_pending 导入落库（SQLite），再 mcp_ingest_ack 删除队列文件，形成真实闭环。
+
+fn ingest_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = data_dir_for(app)?.join("ingest-requests");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+#[tauri::command]
+pub fn mcp_ingest_pending(app: AppHandle) -> Result<Vec<Value>, String> {
+    let dir = ingest_dir(&app)?;
+    let mut out = Vec::new();
+    if let Ok(rd) = fs::read_dir(&dir) {
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            if let Ok(text) = fs::read_to_string(&path) {
+                if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                    out.push(v);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+pub fn mcp_ingest_ack(app: AppHandle, ids: Vec<String>) -> Result<(), String> {
+    let dir = ingest_dir(&app)?;
+    for id in ids {
+        let safe: String = id.chars().filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_').collect();
+        if safe.is_empty() {
+            continue;
+        }
+        let _ = fs::remove_file(dir.join(format!("{safe}.json")));
+    }
+    Ok(())
+}

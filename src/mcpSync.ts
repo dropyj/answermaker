@@ -8,7 +8,7 @@
 import { call, isTauri } from "./bridge";
 import { getChunks } from "./search";
 import { listEncItems, readLegacyItems } from "./crypto";
-import type { FileEntry, KnowledgeDoc } from "./types";
+import type { Account, CalEvent, FileEntry, KnowledgeDoc, Note, Project, ProjectLink, SystemEntry, Todo } from "./types";
 
 type SyncResult = {
   docs: number;
@@ -39,6 +39,19 @@ export function buildVaultRefs() {
 }
 
 /** 与聊天区 BM25 检索使用同一份切块数据。 */
+export interface AppExtras {
+  projects: Project[];
+  links: ProjectLink[];
+  systems: SystemEntry[];
+  notes: Note[];
+  todos: Todo[];
+  events: CalEvent[];
+  accounts: Account[];
+}
+let extras: AppExtras = { projects: [], links: [], systems: [], notes: [], todos: [], events: [], accounts: [] };
+/** App 在实体变化时更新附加快照（systems/projects/notes/todos/events/accounts），随 knowledge.json 一起同步给 MCP server。 */
+export function setAppExtras(next: AppExtras) { extras = next; }
+
 export function buildKnowledge(docs: KnowledgeDoc[], files: FileEntry[]) {
   return {
     note: "AnswerMaker 自动同步：与聊天检索使用同一份文档/切块/文件数据。",

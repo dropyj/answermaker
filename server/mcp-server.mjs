@@ -13,7 +13,7 @@
 // POPO：link_read / popo_spaces / popo_list 经 popo-cli（OpenID 登录）读取。
 
 import http from "node:http";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync, unlinkSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -504,6 +504,33 @@ function serverStatus() {
   };
 }
 
+// ---- 附加快照（随 knowledge.json 同步：systems/projects/notes/todos/events/accounts） ----
+const snapList = (key) => {
+  const k = loadKnowledge();
+  return Array.isArray(k[key]) ? k[key] : [];
+};
+const accountLabel = (id) => {
+  if (!id) return "";
+  const a = snapList("accounts").find((x) => x.id === id);
+  return a ? a.label : "";
+};
+
+// ---- 写工具 ingest 队列：落盘 ingest-requests/<id>.json，由应用轮询导入落库后 ack 删除 ----
+const INGEST_DIR = join(DATA_DIR, "ingest-requests");
+function queueIngest(entry) {
+  mkdirSync(INGEST_DIR, { recursive: true });
+  const id = randomUUID().slice(0, 8);
+  const record = { id, createdAt: Date.now(), ...entry };
+  writeFileSync(join(INGEST_DIR, `${id}.json`), JSON.stringify(record, null, 2));
+  return { queued: true, id, note: "已进入导入队列，等待 AnswerMaker 应用轮询导入并落库（应用运行中约 3 秒内完成）" };
+}
+
+function textHit(query, fields) {
+  const tokens = [...new Set(tokenize(query))].filter(Boolean);
+  if (!tokens.length) return false;
+  return fields.some((f) => tokens.some((t) => String(f ?? "").toLowerCase().includes(t.toLowerCase())));
+}
+
 const TOOLS = [
   {
     name: "server_info",
@@ -595,6 +622,41 @@ const TOOLS = [
     description: "列出 POPO 个人云空间或团队空间目录；folderId=0 表示根目录，不传 teamSpaceId 表示个人云空间。",
     inputSchema: { type: "object", properties: { teamSpaceId: { type: "string" }, folderId: { type: "string" } } },
   },
+  {
+    name: "notes_list",
+    description: "列出速记笔记（标题、正文、置顶与所属项目）。",
+    inputSchema: { type: "object", properties: { limit: { type: "number" } } },
+  },
+  {
+    name: "notes_add",
+    description: "新增一条速记：经 ingest 队列由 AnswerMaker 应用落库，返回队列 id。",
+    inputSchema: { type: "object", properties: { title: { type: "string" }, content: { type: "string" } }, required: ["title"] },
+  },
+  {
+    name: "todos_list",
+    description: "列出待办，可按 status（todo/done）过滤。",
+    inputSchema: { type: "object", properties: { status: { type: "string" }, limit: { type: "number" } } },
+  },
+  {
+    name: "todos_add",
+    description: "新增待办：经 ingest 队列由应用落库；dueAt 为毫秒时间戳，priority 为 high/normal/low。",
+    inputSchema: { type: "object", properties: { title: { type: "string" }, dueAt: { type: "number" }, priority: { type: "string" } }, required: ["title"] },
+  },
+  {
+    name: "todos_done",
+    description: "把某条待办标记为已完成：经 ingest 队列由应用落库。",
+    inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+  },
+  {
+    name: "events_list",
+    description: "列出日程（按开始时间升序）。",
+    inputSchema: { type: "object", properties: { limit: { type: "number" } } },
+  },
+  {
+    name: "events_add",
+    description: "新增日程：经 ingest 队列由应用落库；startAt/endAt 为毫秒时间戳。",
+    inputSchema: { type: "object", properties: { title: { type: "string" }, startAt: { type: "number" }, endAt: { type: "number" }, note: { type: "string" } }, required: ["title", "startAt"] },
+  },
 ];
 
 async function callTool(name, args = {}, client = "unknown") {
@@ -643,12 +705,27 @@ async function callTool(name, args = {}, client = "unknown") {
       const files = fileSearch(query, limit);
       const vault = vaultSearch(query, limit);
       const knowledge = knowledgeSearch(query, limit);
+      const systems = snapList("systems")
+        .filter((x) => textHit(query, [x.name, x.description, x.keywords, x.url]))
+        .slice(0, limit)
+        .map((x) => ({ id: x.id, name: x.name, url: x.url, description: x.description ?? "", accountId: x.accountId ?? "", account: accountLabel(x.accountId) }));
+      const notes = snapList("notes")
+        .filter((x) => textHit(query, [x.title, x.content]))
+        .slice(0, limit)
+        .map((x) => ({ id: x.id, title: x.title, pinned: !!x.pinned, updatedAt: x.updatedAt ?? 0 }));
+      const todos = snapList("todos")
+        .filter((x) => textHit(query, [x.title]))
+        .slice(0, limit)
+        .map((x) => ({ id: x.id, title: x.title, status: x.status, dueAt: x.dueAt ?? 0 }));
       return {
         query,
         files,
         vault,
         knowledge,
-        summary: { files: files.length, vault: vault.length, knowledge: knowledge.length },
+        systems,
+        notes,
+        todos,
+        summary: { files: files.length, vault: vault.length, knowledge: knowledge.length, systems: systems.length, notes: notes.length, todos: todos.length },
       };
     }
     case "files_list":
@@ -667,6 +744,44 @@ async function callTool(name, args = {}, client = "unknown") {
       const teamSpaceId = typeof args.teamSpaceId === "string" ? args.teamSpaceId : "";
       const folderId = typeof args.folderId === "string" && args.folderId ? args.folderId : "0";
       return await listFolder(teamSpaceId, folderId);
+    }
+    case "notes_list":
+      return { notes: snapList("notes").slice(0, clampLimit(args.limit)) };
+    case "notes_add": {
+      const title = requireString(args, "title");
+      audit({ client, event: "ingest_queue", tool: name, ref: "note", result: "queued" });
+      return queueIngest({ kind: "note", title, content: typeof args.content === "string" ? args.content : title, client });
+    }
+    case "todos_list": {
+      const all = snapList("todos");
+      const filtered = typeof args.status === "string" ? all.filter((t) => t.status === args.status) : all;
+      return { todos: filtered.slice(0, clampLimit(args.limit)) };
+    }
+    case "todos_add": {
+      const title = requireString(args, "title");
+      audit({ client, event: "ingest_queue", tool: name, ref: "todo", result: "queued" });
+      return queueIngest({
+        kind: "todo", title, client,
+        dueAt: typeof args.dueAt === "number" ? args.dueAt : undefined,
+        priority: ["high", "normal", "low"].includes(args.priority) ? args.priority : "normal",
+      });
+    }
+    case "todos_done": {
+      const id = requireString(args, "id");
+      audit({ client, event: "ingest_queue", tool: name, ref: "todo_done", result: "queued" });
+      return queueIngest({ kind: "todo_done", todoId: id, client });
+    }
+    case "events_list":
+      return { events: [...snapList("events")].sort((a, b) => (a.startAt ?? 0) - (b.startAt ?? 0)).slice(0, clampLimit(args.limit)) };
+    case "events_add": {
+      const title = requireString(args, "title");
+      if (typeof args.startAt !== "number" || !args.startAt) throw invalid("events_add 需要 startAt（毫秒时间戳）");
+      audit({ client, event: "ingest_queue", tool: name, ref: "event", result: "queued" });
+      return queueIngest({
+        kind: "event", title, startAt: args.startAt, client,
+        endAt: typeof args.endAt === "number" ? args.endAt : undefined,
+        note: typeof args.note === "string" ? args.note : undefined,
+      });
     }
     default:
       throw Object.assign(new Error(`Unknown tool: ${name}`), { code: -32602 });

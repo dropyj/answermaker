@@ -4,7 +4,7 @@
 // 可选：SMOKE_VERBOSE=1 打印服务端日志；SMOKE_POPO=1 额外测试 POPO 空间/链接读取。
 
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -118,7 +118,7 @@ try {
 
     const tools = await rpc("tools/list");
     const names = tools.json?.result?.tools?.map((t) => t.name) ?? [];
-    check("tools/list", tools.status === 200 && names.length === 16, `${names.length} tools`);
+    check("tools/list", tools.status === 200 && names.length === 23, `${names.length} tools`);
     check("server_status tool", names.includes("server_status"));
     check("search_all tool", names.includes("search_all"));
     check("vault secret tools", ["vault_get_secret", "vault_secret_status", "vault_secret_release"].every((n) => names.includes(n)));
@@ -159,6 +159,52 @@ try {
       "search_all",
       Array.isArray(allOut.files) && Array.isArray(allOut.vault) && Array.isArray(allOut.knowledge),
     );
+
+    // ---- WF2: systems/notes/todos/events 快照检索 + 写工具 ingest 队列 ----
+    const dataDir = join(root, "server", "data");
+    const knowledgePath = join(dataDir, "knowledge.json");
+    const originalKnowledge = existsSync(knowledgePath) ? readFileSync(knowledgePath, "utf8") : null;
+    const queuedFiles = [];
+    try {
+      const snap = originalKnowledge ? JSON.parse(originalKnowledge) : { docs: [], files: [] };
+      snap.systems = [{ id: "smoke-sys", name: "烟测报销系统", url: "https://smoke.example.com/", description: "烟测报销入口", keywords: "烟测 报销", projectIds: [] }];
+      snap.notes = [{ id: "smoke-note", title: "烟测速记标题", content: "烟测速记内容", createdAt: 1, updatedAt: 1, pinned: true }];
+      snap.todos = [{ id: "smoke-todo", title: "烟测待办事项", status: "todo", priority: "normal", createdAt: 1, updatedAt: 1 }];
+      snap.events = [{ id: "smoke-event", title: "烟测日程会议", startAt: Date.now() + 3600000, createdAt: 1, updatedAt: 1 }];
+      writeFileSync(knowledgePath, JSON.stringify(snap, null, 2));
+
+      const all2 = await rpc("tools/call", { name: "search_all", arguments: { query: "烟测", limit: 5 } });
+      const all2Out = JSON.parse(all2.json?.result?.content?.[0]?.text ?? "{}");
+      check("search_all includes systems", Array.isArray(all2Out.systems) && all2Out.systems.some((x) => x.id === "smoke-sys"));
+      check("search_all includes notes/todos", (all2Out.notes ?? []).some((x) => x.id === "smoke-note") && (all2Out.todos ?? []).some((x) => x.id === "smoke-todo"));
+
+      const nl = await rpc("tools/call", { name: "notes_list", arguments: {} });
+      const nlOut = JSON.parse(nl.json?.result?.content?.[0]?.text ?? "{}");
+      check("notes_list", (nlOut.notes ?? []).some((x) => x.id === "smoke-note"));
+      const tl = await rpc("tools/call", { name: "todos_list", arguments: { status: "todo" } });
+      const tlOut = JSON.parse(tl.json?.result?.content?.[0]?.text ?? "{}");
+      check("todos_list", (tlOut.todos ?? []).some((x) => x.id === "smoke-todo"));
+      const el = await rpc("tools/call", { name: "events_list", arguments: {} });
+      const elOut = JSON.parse(el.json?.result?.content?.[0]?.text ?? "{}");
+      check("events_list", (elOut.events ?? []).some((x) => x.id === "smoke-event"));
+
+      for (const [tool, args] of [
+        ["notes_add", { title: "smoke 队列速记" }],
+        ["todos_add", { title: "smoke 队列待办" }],
+        ["todos_done", { id: "smoke-todo" }],
+        ["events_add", { title: "smoke 队列日程", startAt: Date.now() + 7200000 }],
+      ]) {
+        const r = await rpc("tools/call", { name: tool, arguments: args });
+        const out = JSON.parse(r.json?.result?.content?.[0]?.text ?? "{}");
+        const file = join(dataDir, "ingest-requests", `${out.id}.json`);
+        const okFile = out.queued === true && existsSync(file);
+        if (okFile) queuedFiles.push(file);
+        check(`${tool} → ingest queue`, okFile);
+      }
+    } finally {
+      if (originalKnowledge !== null) writeFileSync(knowledgePath, originalKnowledge);
+      for (const f of queuedFiles) { try { unlinkSync(f); } catch { /* ignore */ } }
+    }
 
     const status = await rpc("tools/call", { name: "server_status", arguments: {} });
     const statusOut = JSON.parse(status.json?.result?.content?.[0]?.text ?? "{}");

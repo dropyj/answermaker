@@ -296,6 +296,8 @@ pub fn run() {
             mcp::mcp_secret_pending,
             mcp::mcp_secret_deny,
             mcp::mcp_secret_fulfill,
+            mcp::mcp_ingest_pending,
+            mcp::mcp_ingest_ack,
             mcp::mcp_set_lan,
             mcp::mcp_tokens_list,
             mcp::mcp_token_add,
