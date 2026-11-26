@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import type { Project, ProjectLink, SecretRequest, VaultItem, VaultType } from "../types";
 import ProjectPicker from "./ProjectPicker";
+import { exportAttachment, makeAttachment, type AttachmentRecord } from "../attachments";
+import { touchLastUsed, type VaultEnv } from "../crypto";
 import { vaultRef } from "../types";
 import { call } from "../bridge";
 import {
@@ -42,6 +44,8 @@ export default function Vault({
   links = [],
   setLinks,
   focusId,
+  attachments = [],
+  setAttachments,
 }: {
   secretReqs?: SecretRequest[];
   onRefreshSecrets?: () => void;
@@ -49,6 +53,8 @@ export default function Vault({
   links?: ProjectLink[];
   setLinks?: (next: ProjectLink[]) => void;
   focusId?: string | null;
+  attachments?: AttachmentRecord[];
+  setAttachments?: (next: AttachmentRecord[]) => void;
 }) {
   const [hasMeta, setHasMeta] = useState(() => hasVaultMeta());
   const [unlocked, setUnlocked] = useState(() => isUnlocked());
@@ -60,12 +66,15 @@ export default function Vault({
   const [notice, setNotice] = useState("");
   const [legacy, setLegacy] = useState<VaultItem[] | null>(() => readLegacyItems());
   const [form, setForm] = useState<Partial<VaultItem>>({ type: "api key", key: "", value: "", account: "", url: "" });
+  const [formHealth, setFormHealth] = useState<{ expiresAt: string; env: VaultEnv | "" }>({ expiresAt: "", env: "" });
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [scanned, setScanned] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editKey, setEditKey] = useState("");
   const [editType, setEditType] = useState<VaultType>("api key");
   const [editUrl, setEditUrl] = useState("");
+  const [editExpires, setEditExpires] = useState("");
+  const [editEnv, setEditEnv] = useState<VaultEnv | "">("");
   const [autoLock, setAutoLock] = useState(() => {
     try { return localStorage.getItem(AUTOLOCK_KEY) !== "0"; } catch { return true; }
   });
@@ -153,6 +162,7 @@ export default function Vault({
       window.setTimeout(() => setCopied(null), 1500);
       setNotice("已复制到剪贴板；30 秒后自动清空（期间若复制了其他内容，不会误删）。");
       scheduleClipboardClear(text);
+      void touchLastUsed(enc.id).then(refresh).catch(() => {});
     } catch (e) { setError(e instanceof Error ? e.message : "复制失败"); }
   };
 
@@ -200,6 +210,7 @@ export default function Vault({
         secret: JSON.stringify(payload, null, 2),
         ttlSec: r.ttlSec ?? 60,
       });
+      void touchLastUsed(enc.id).then(refresh).catch(() => {});
       setNotice(`已授权：临时文件 ${path}（${r.ttlSec ?? 60} 秒后自动删除）。用完后请求方可调用 vault_secret_release 立即删除。`);
       onRefreshSecrets?.();
     } catch (e) {
@@ -220,7 +231,7 @@ export default function Vault({
 
   const add = async () => {
     if (!form.key || !form.value) { setError("key 与 value 必填"); return; }
-    await addVaultItem({ key: form.key, value: form.value, type: (form.type as VaultType) ?? "api key", account: form.account ?? "", url: form.url ?? "" });
+    await addVaultItem({ key: form.key, value: form.value, type: (form.type as VaultType) ?? "api key", account: form.account ?? "", url: form.url ?? "", expiresAt: formHealth.expiresAt || undefined, env: formHealth.env || undefined });
     setForm({ type: "api key", key: "", value: "", account: "", url: "" });
     refresh();
   };
@@ -228,13 +239,14 @@ export default function Vault({
   const startEdit = (i: EncVaultItem) => {
     setError(""); setNotice("");
     setEditingId(i.id); setEditKey(i.key); setEditType(i.type); setEditUrl(i.url);
+    setEditExpires(i.expiresAt ?? ""); setEditEnv(i.env ?? "");
   };
 
   const saveEdit = async () => {
     if (!editingId) return;
     setError(""); setNotice("");
     try {
-      await updateVaultItemMeta(editingId, { key: editKey, type: editType, url: editUrl });
+      await updateVaultItemMeta(editingId, { key: editKey, type: editType, url: editUrl, expiresAt: editExpires || undefined, env: editEnv || undefined });
       setEditingId(null);
       refresh();
       setNotice("条目已更新。注意：vault:// 引用已随 key/type 变化，旧引用不再指向该条目；value/account 密文未改动。");
@@ -340,6 +352,47 @@ export default function Vault({
               {i.type === "account" && <div>账号：••••••••（已加密） · 绑定 URL：{i.url}</div>}
               {i.url && i.type !== "account" && <div className="mono dim">{i.url}</div>}
               <div className="mono" title="明文不上屏，仅在复制时于本地解密并写入剪贴板">••••••••（AES-GCM 密文存储）</div>
+              {(() => {
+                const exp = i.expiresAt ? new Date(i.expiresAt).getTime() : NaN;
+                const days = Number.isNaN(exp) ? null : Math.ceil((exp - Date.now()) / 86400000);
+                return (
+                  <div className="dim">
+                    {i.env && <span className="badge">{i.env}</span>}
+                    {days !== null && (days < 0
+                      ? <span className="warn-red">已过期 {-days} 天（{i.expiresAt}）</span>
+                      : days <= 7
+                        ? <span className="warn-yellow">{days} 天后到期（{i.expiresAt}）</span>
+                        : <span>到期 {i.expiresAt}</span>)}
+                    {i.lastUsedAt ? <span> · 最近使用 {new Date(i.lastUsedAt).toLocaleString()}</span> : null}
+                  </div>
+                );
+              })()}
+              {setAttachments && (() => {
+                const att = attachments.find((a) => a.itemId === i.id);
+                return (
+                  <div className="row" style={{ margin: "4px 0" }}>
+                    {att ? (
+                      <>
+                        <span className="badge">附件：{att.name}（{(att.size / 1024).toFixed(1)}KB，加密存储）</span>
+                        <button disabled={!unlocked} onClick={() => void exportAttachment(att).catch((e) => setError(e instanceof Error ? e.message : "导出附件失败"))}>导出附件</button>
+                        <button onClick={() => setAttachments(attachments.filter((a) => a.id !== att.id))}>删除附件</button>
+                      </>
+                    ) : (
+                      <label className="attach-label">
+                        附加文件（≤5MB，加密存储）
+                        <input type="file" style={{ display: "none" }} onChange={(e) => {
+                          const f = e.target.files?.[0];
+                          e.target.value = "";
+                          if (!f) return;
+                          void makeAttachment(i.id, f)
+                            .then((rec) => { setAttachments([...attachments, rec]); setNotice(`附件「${f.name}」已加密保存。`); })
+                            .catch((err) => setError(err instanceof Error ? err.message : "附件保存失败"));
+                        }} />
+                      </label>
+                    )}
+                  </div>
+                );
+              })()}
               {setLinks && <ProjectPicker projects={projects} links={links} entityType="vault" entityId={i.id} setLinks={setLinks} />}
               {editingId === i.id ? (
                 <div className="editbox">
@@ -351,6 +404,13 @@ export default function Vault({
                     </select>
                     <input style={{ gridColumn: "1 / -1" }} placeholder="url（如 https://github.com）"
                       value={editUrl} onChange={(e) => setEditUrl(e.target.value)} />
+                    <input type="date" title="到期日（可选）" value={editExpires} onChange={(e) => setEditExpires(e.target.value)} />
+                    <select value={editEnv} onChange={(e) => setEditEnv(e.target.value as VaultEnv | "")}>
+                      <option value="">环境（可选）</option>
+                      <option value="prod">prod 生产</option>
+                      <option value="test">test 测试</option>
+                      <option value="dev">dev 开发</option>
+                    </select>
                   </div>
                   <div className="hint" style={{ margin: 0 }}>
                     key/type/url 可改；value 与 account 密文不变。
@@ -388,6 +448,13 @@ export default function Vault({
             </select>
             <input placeholder="account（type=account 时填账号，将一并加密）" value={form.account} onChange={(e) => setForm({ ...form, account: e.target.value })} />
             <input placeholder="url（如 https://github.com）" value={form.url} onChange={(e) => setForm({ ...form, url: e.target.value })} />
+            <input type="date" title="到期日（可选，密钥健康提醒）" value={formHealth.expiresAt} onChange={(e) => setFormHealth({ ...formHealth, expiresAt: e.target.value })} />
+            <select value={formHealth.env} onChange={(e) => setFormHealth({ ...formHealth, env: e.target.value as VaultEnv | "" })}>
+              <option value="">环境（可选）</option>
+              <option value="prod">prod 生产</option>
+              <option value="test">test 测试</option>
+              <option value="dev">dev 开发</option>
+            </select>
             <button onClick={add}>添加条目（加密）</button>
           </div>
           {form.type === "account" && <p className="hint">account 类型会绑定账号 + 密码并加密保存。</p>}

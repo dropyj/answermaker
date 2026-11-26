@@ -10,7 +10,9 @@ import Tasks from "./modules/Tasks";
 import Briefing from "./modules/Briefing";
 import { parseCreationIntent } from "./dateParse";
 import { setAppExtras } from "./mcpSync";
-import { listEncItems } from "./crypto";
+import { importVaultItem, isUnlocked, listEncItems } from "./crypto";
+import { setAttachmentIndex, type AttachmentRecord } from "./attachments";
+import { mergeById, type SyncPayload } from "./sync";
 import { searchSystems } from "./systems";
 import FileHitCard from "./modules/FileHitCard";
 import Mcp from "./modules/Mcp";
@@ -25,7 +27,7 @@ import { call, isTauri } from "./bridge";
 import { uid } from "./types";
 import { installMcpSync, scheduleMcpSync } from "./mcpSync";
 import { isMcpFollowMain } from "./mcpPrefs";
-import { loadAppData, saveDocs as saveDocsDb, saveFiles as saveFilesDb, saveProjects as saveProjectsDb, saveLinks as saveLinksDb, saveSystems as saveSystemsDb, saveNotes as saveNotesDb, saveTodos as saveTodosDb, saveEvents as saveEventsDb } from "./db";
+import { loadAppData, saveDocs as saveDocsDb, saveFiles as saveFilesDb, saveProjects as saveProjectsDb, saveLinks as saveLinksDb, saveSystems as saveSystemsDb, saveNotes as saveNotesDb, saveTodos as saveTodosDb, saveEvents as saveEventsDb, saveAttachments as saveAttachmentsDb } from "./db";
 import { initChunks } from "./search";
 import { initVaultStore } from "./crypto";
 import type { AgentCli, CalEvent, ChatMessage, ChatMode, FileEntry, KnowledgeDoc, ModelId, Note, OllamaStatus, Project, ProjectLink, SearchHit, SecretRequest, SystemEntry, Todo, VaultHit } from "./types";
@@ -183,6 +185,7 @@ export default function App() {
   const [notes, setNotes] = useState<Note[]>([]);
   const [todos, setTodos] = useState<Todo[]>([]);
   const [events, setEvents] = useState<CalEvent[]>([]);
+  const [attachments, setAttachments] = useState<AttachmentRecord[]>([]);
   const [focusId, setFocusId] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
 
@@ -232,6 +235,7 @@ export default function App() {
         setNotes(snap.notes);
         setTodos(snap.todos);
         setEvents(snap.events);
+        setAttachments((snap.attachments ?? []) as AttachmentRecord[]);
         setReady(true);
       } catch (e) {
         if (alive) {
@@ -290,6 +294,43 @@ export default function App() {
     if (!ready || bootError) return;
     void saveEventsDb(events).catch(() => {});
   }, [events, ready, bootError]);
+
+  useEffect(() => {
+    if (!ready || bootError) return;
+    void saveAttachmentsDb(attachments).catch(() => {});
+    setAttachmentIndex(attachments);
+  }, [attachments, ready, bootError]);
+
+  // 同步包导入合并：按 id + updatedAt 新者胜，冲突保留较新并计数；保险库按本地主密码重新加密
+  const mergeSyncPayload = useCallback(async (payload: SyncPayload): Promise<string> => {
+    const parts: string[] = [];
+    const apply = <T extends { id: string; updatedAt?: number; createdAt?: number }>(
+      label: string, local: T[], incoming: T[], set: (v: T[]) => void,
+    ) => {
+      if (!incoming.length) return;
+      const r = mergeById(local, incoming);
+      set(r.merged);
+      parts.push(`${label} 新增 ${r.added}/更新 ${r.updated}${r.conflicts ? `（冲突 ${r.conflicts}，已保留较新）` : ""}`);
+    };
+    apply("项目", projects, payload.projects, setProjects);
+    apply("关联", links, payload.links, setLinks);
+    apply("系统", systems, payload.systems, setSystems);
+    apply("笔记", notes, payload.notes, setNotes);
+    apply("待办", todos, payload.todos, setTodos);
+    apply("日程", events, payload.events, setEvents);
+    if (payload.vault === null) parts.push("保险库：来源设备导出时未解锁，未包含");
+    else if (!isUnlocked()) parts.push(`保险库：本机未解锁，跳过 ${payload.vault.length} 条（解锁后重新导入即可）`);
+    else {
+      let added = 0, updated = 0;
+      for (const item of payload.vault) {
+        const cur = listEncItems().find((i) => i.id === item.id);
+        if (!cur) { await importVaultItem(item); added++; }
+        else if ((item.updatedAt ?? 0) > (cur.updatedAt ?? cur.createdAt)) { await importVaultItem(item); updated++; }
+      }
+      parts.push(`保险库 新增 ${added}/更新 ${updated}（已按本机主密码重新加密）`);
+    }
+    return parts.length ? parts.join("；") : "同步包没有可合并的新数据";
+  }, [projects, links, systems, notes, todos, events]);
 
   // MCP 附加快照（systems/projects/notes/todos/events/accounts）随 knowledge.json 同步
   useEffect(() => {
@@ -582,14 +623,14 @@ export default function App() {
           s.models.includes(prev) || s.models.includes(`${prev}:latest`) ? prev : s.recommended_model
         )} />
 
-        {section === "vault" && <Vault secretReqs={secretReqs} onRefreshSecrets={refreshSecretReqs} projects={projects} links={links} setLinks={setLinks} focusId={focusId} />}
+        {section === "vault" && <Vault secretReqs={secretReqs} onRefreshSecrets={refreshSecretReqs} projects={projects} links={links} setLinks={setLinks} focusId={focusId} attachments={attachments} setAttachments={setAttachments} />}
         {section === "knowledge" && <Knowledge docs={docs} setDocs={setDocs} files={files} setFiles={setFiles} projects={projects} links={links} setLinks={setLinks} focusId={focusId} />}
         {section === "files" && <Files files={files} setFiles={setFiles} docs={docs} projects={projects} links={links} setLinks={setLinks} focusId={focusId} />}
         {section === "systems" && <Systems systems={systems} setSystems={setSystems} projects={projects} links={links} setLinks={setLinks} focusId={focusId} />}
         {section === "projects" && <Projects projects={projects} setProjects={setProjects} links={links} setLinks={setLinks} docs={docs} files={files} systems={systems} notes={notes} todos={todos} go={go} />}
         {section === "tasks" && <Tasks notes={notes} setNotes={setNotes} todos={todos} setTodos={setTodos} events={events} setEvents={setEvents} projects={projects} focusId={focusId} />}
         {section === "mcp" && <Mcp />}
-        {section === "settings" && <Settings />}
+        {section === "settings" && <Settings syncData={{ projects, links, systems, notes, todos, events, accounts: [] }} onSyncMerge={mergeSyncPayload} />}
         {section === "chat" && (
           <div className="chatwrap">
             <div className="chatmain">

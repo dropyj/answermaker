@@ -21,6 +21,7 @@ const VERIFIER_PLAINTEXT = "answermaker-vault-verifier-v2";
 
 interface CipherBlob { iv: string; ct: string }
 interface VaultMeta { version: 2; iterations: number; salt: string; verifier: CipherBlob }
+export type VaultEnv = "prod" | "test" | "dev";
 export interface EncVaultItem {
   id: string;
   key: string;
@@ -29,6 +30,11 @@ export interface EncVaultItem {
   encValue: CipherBlob;
   encAccount: CipherBlob | null; // type=account（或 account 非空）时加密保存
   createdAt: number;
+  // 密钥健康（WF3）：均为明文元数据，不涉及 value/account
+  expiresAt?: string; // 到期日 YYYY-MM-DD
+  env?: VaultEnv; // 环境标注
+  lastUsedAt?: number; // 最近一次复制/经 MCP 取用的时间戳
+  updatedAt?: number;
 }
 
 // ---- 内存缓存（启动时从 SQLite 载入一次） ----
@@ -146,19 +152,74 @@ function requireKey(): CryptoKey {
 }
 
 /** 新增条目：value 单独 IV 加密；account 非空（尤其 type=account）时同样加密。 */
-export async function addVaultItem(item: Omit<VaultItem, "id">): Promise<EncVaultItem> {
+export async function addVaultItem(
+  item: Omit<VaultItem, "id"> & { expiresAt?: string; env?: VaultEnv },
+): Promise<EncVaultItem> {
   await ensureLoaded();
   const key = requireKey();
+  const now = Date.now();
   const enc: EncVaultItem = {
     id: Math.random().toString(36).slice(2, 10),
     key: item.key, type: item.type, url: item.url,
     encValue: await encryptWith(key, item.value),
     encAccount: item.account ? await encryptWith(key, item.account) : null,
-    createdAt: Date.now(),
+    createdAt: now, updatedAt: now,
+    expiresAt: item.expiresAt || undefined,
+    env: item.env,
   };
   itemsCache = [...itemsCache, enc];
   await persistVault();
   return enc;
+}
+
+/** 同步导入：保留原 id，用本地会话密钥重新加密落库（已存在同 id 时由调用方先做新旧比较）。 */
+export async function importVaultItem(item: VaultItem & { expiresAt?: string; env?: VaultEnv; createdAt?: number; updatedAt?: number }): Promise<void> {
+  await ensureLoaded();
+  const key = requireKey();
+  const enc: EncVaultItem = {
+    id: item.id,
+    key: item.key, type: item.type, url: item.url,
+    encValue: await encryptWith(key, item.value),
+    encAccount: item.account ? await encryptWith(key, item.account) : null,
+    createdAt: item.createdAt ?? Date.now(),
+    updatedAt: item.updatedAt ?? Date.now(),
+    expiresAt: item.expiresAt || undefined,
+    env: item.env,
+  };
+  itemsCache = [...itemsCache.filter((i) => i.id !== item.id), enc];
+  await persistVault();
+}
+
+/** 解密全部条目（仅同步导出用；必须已解锁，调用方负责只在用户主动导出时调用）。 */
+export async function decryptAllItems(): Promise<(VaultItem & { expiresAt?: string; env?: VaultEnv; createdAt: number; updatedAt: number })[]> {
+  await ensureLoaded();
+  const out = [];
+  for (const enc of itemsCache) {
+    const plain = await decryptVaultItem(enc);
+    out.push({ ...plain, expiresAt: enc.expiresAt, env: enc.env, createdAt: enc.createdAt, updatedAt: enc.updatedAt ?? enc.createdAt });
+  }
+  return out;
+}
+
+/** 用会话密钥加密任意字节（加密附件用）；锁定返回 null。 */
+export async function encryptBytes(data: ArrayBuffer): Promise<CipherBlob | null> {
+  if (!sessionKey) return null;
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv: iv as BufferSource }, sessionKey, data);
+  return { iv: b64(iv), ct: b64(ct) };
+}
+
+/** 解密 encryptBytes 的输出。 */
+export async function decryptBytes(blob: CipherBlob): Promise<ArrayBuffer> {
+  const key = requireKey();
+  return crypto.subtle.decrypt({ name: "AES-GCM", iv: unb64(blob.iv) as BufferSource }, key, unb64(blob.ct) as BufferSource);
+}
+
+/** 记录最近使用时间（复制凭据 / 经 MCP 取用时调用，无需解锁校验之外的副作用）。 */
+export async function touchLastUsed(id: string): Promise<void> {
+  await ensureLoaded();
+  itemsCache = itemsCache.map((i) => (i.id === id ? { ...i, lastUsedAt: Date.now() } : i));
+  await persistVault();
 }
 
 export async function decryptVaultItem(enc: EncVaultItem): Promise<VaultItem> {
@@ -182,10 +243,10 @@ export async function deleteVaultItem(id: string): Promise<void> {
  */
 export async function updateVaultItemMeta(
   id: string,
-  patch: Partial<Pick<EncVaultItem, "key" | "type" | "url">>,
+  patch: Partial<Pick<EncVaultItem, "key" | "type" | "url" | "expiresAt" | "env" | "lastUsedAt">>,
 ): Promise<EncVaultItem> {
   await ensureLoaded();
-  const next = itemsCache.map((i) => (i.id === id ? { ...i, ...patch } : i));
+  const next = itemsCache.map((i) => (i.id === id ? { ...i, ...patch, updatedAt: Date.now() } : i));
   const updated = next.find((i) => i.id === id);
   if (!updated) throw new Error("条目不存在，可能已被删除");
   if (!updated.key.trim()) throw new Error("key 不能为空");

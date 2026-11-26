@@ -161,6 +161,15 @@ fn chat_send(message: String, mode: String, _model: String) -> ChatReply {
 
 /// Read a text file selected/dropped from the local filesystem.
 /// Used by the knowledge module so the original absolute path can be kept.
+/// Write a text file to an absolute path chosen by the user (sync package export).
+#[tauri::command]
+fn write_text_file(path: String, contents: String) -> Result<(), String> {
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, contents).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn read_text_file(path: String) -> Result<String, String> {
     let meta = std::fs::metadata(&path).map_err(|e| format!("无法读取文件：{e}"))?;
@@ -305,6 +314,7 @@ pub fn run() {
             mcp::mcp_audit_tail,
             chat_send,
             read_text_file,
+            write_text_file,
             open_url,
             open_path,
             popo::popo_auth_status,

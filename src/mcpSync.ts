@@ -8,6 +8,7 @@
 import { call, isTauri } from "./bridge";
 import { getChunks } from "./search";
 import { listEncItems, readLegacyItems } from "./crypto";
+import { itemHasAttachment } from "./attachments";
 import type { Account, CalEvent, FileEntry, KnowledgeDoc, Note, Project, ProjectLink, SystemEntry, Todo } from "./types";
 
 type SyncResult = {
@@ -21,16 +22,19 @@ type SyncResult = {
 
 /** 与保险库「导出引用 JSON」一致：只有 vault:// 与元数据，不含明文。 */
 export function buildVaultRefs() {
-  const mk = (i: { id?: string; key: string; type: string; url?: string }, legacy = false) => ({
+  const mk = (i: { id?: string; key: string; type: string; url?: string; expiresAt?: string; env?: string }, legacy = false) => ({
     id: i.id ?? "",
     key: i.key,
     ref: `vault://${i.key}/${i.type.replace(/\s+/g, "-")}`,
     type: i.type,
     url: i.url ?? "",
+    hasAttachment: i.id ? itemHasAttachment(i.id) : false,
+    expiresAt: i.expiresAt ?? "",
+    env: i.env ?? "",
     ...(legacy ? { legacy: true } : {}),
   });
   return {
-    note: "仅包含 vault:// 引用与元数据，不含明文 value/account。",
+    note: "仅包含 vault:// 引用与元数据，不含明文 value/account；hasAttachment 只标注是否存在加密附件，附件内容不经 MCP 暴露。",
     refs: [
       ...listEncItems().map((i) => mk(i)),
       ...(readLegacyItems() ?? []).map((i) => mk(i, true)),

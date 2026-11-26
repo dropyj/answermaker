@@ -11,7 +11,13 @@ const fmtTime = (iso?: string | null) => {
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
 };
 
-export default function Settings() {
+import SyncPanel, { type SyncData } from "./SyncPanel";
+import type { SyncPayload } from "../sync";
+
+export default function Settings({ syncData, onSyncMerge }: {
+  syncData?: SyncData;
+  onSyncMerge?: (payload: SyncPayload) => Promise<string>;
+} = {}) {
   const tauri = isTauri();
   const [auth, setAuth] = useState<PopoAuthStatus | null>(null);
   const [checked, setChecked] = useState(false);
@@ -187,6 +193,7 @@ export default function Settings() {
   return (
     <div className="panel">
       <h2>设置 Settings</h2>
+      {syncData && onSyncMerge && <SyncPanel data={syncData} onMerge={onSyncMerge} />}
 
       <h3>在线内容登录（POPO / KM）</h3>
       <p className="hint">
