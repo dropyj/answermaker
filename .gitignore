@@ -48,3 +48,6 @@ desktop.ini
 
 # 旧版本目录（已删除，防止再次误入）
 answermaker-v0.2/
+
+# Tauri updater 签名私钥（绝不进仓库，见 README 发布章节）
+.updater/

@@ -447,3 +447,11 @@ cargo test --manifest-path src-tauri/Cargo.toml   # 含密钥写入单测
 - 存储：SQLite `doc_vectors`（chunk_id + Float32 base64），浏览器回退 localStorage；与 chunks 同生命周期（删文档/删切块同步删向量，db_save_docs 有孤儿清理兜底）。
 - 混合排序：候选 = BM25 命中 ∪ 余弦 ≥ 0.35 的向量命中；`hybrid = 0.5 * (bm25/本次最大bm25) + 0.5 * clamp(余弦, 0, 1)`；hybrid 作为 baseScore 进入召回反馈层（项3b 公式/面板不变）。聊天与搜索模式走 `searchKnowledge` 异步入口；命令面板仍用同步 BM25（快速跳转场景，不等模型）。
 - 自查：`npm run embedding:check`（Node + transformers.js 实测：cos(相近句)=0.6782 > cos(不相干句)=0.3426，PASS）。
+
+
+## 安装包与自动更新（项4，已落地代码侧）
+
+- bundle.resources 打包 server/ 与 cli/；mcp.rs 路径候选打包内优先、开发回退；数据目录可写探测，安装目录只读时回退 %APPDATA%/AnswerMaker/mcp-data 并以 ANSWERMAKER_DATA_DIR 注入服务端进程。
+- Node 不打包：启动检测 node_version，未装时报错与 MCP 面板都给安装指引。
+- updater：tauri-plugin-updater + tauri-plugin-process 已注册，公钥在 tauri.conf.json，端点 https://heytiger.cn/updates/{{target}}/{{current_version}}，createUpdaterArtifacts 已开；私钥在工作区 .updater/（gitignore）。代码签名无证书跳过（SmartScreen 提示已写进设置页与 README）。
+- 待联调：服务器 /updates/ 静态目录与 latest.json 发布流程需在首次正式发版时在服务器侧落地并实测一次完整升级。

@@ -385,3 +385,13 @@ popo-cli auth login     # 浏览器 OpenID 登录（CLI 自动打开浏览器）
 
 - **V0.3**：安全组第一批已完成（见上）；V0.4 已完成项目/事务/同步/PDF/账号隔离（见上）；同步服务器已上 HTTPS（默认端点 `https://heytiger.cn/amsync`）并改为账号登录体系；剩余：保险库从 WebCrypto 迁移到 Rust Argon2id + `.enc` 落盘与系统钥匙串；在线文档自动同步（ETag/版本校验 + 权限/删除同步）；聊天接 OpenAI/Claude
 - **V1.0**：macOS（P1）适配与打包（含 icon.icns）、知识库迁移 SQLite FTS5/向量索引 + bge-m3 混合检索、云端向量库（当前仅预留接口，备注待开发，转排期前需补齐设计）
+
+## 打包与发布（项4）
+
+- **资源打包**：`tauri.conf.json` 的 `bundle.resources` 把 `server/`（MCP 服务端）与 `cli/` 一并打进安装包；桌面端启动 MCP 时优先用安装目录内的 server（`mcp.rs` 候选顺序：环境变量 → exe 同级/resources → 开发相对路径 → cwd 项目目录）。安装目录只读时 MCP 数据目录自动回退到 `%APPDATA%/AnswerMaker/mcp-data` 并经环境变量传给服务端。
+- **Node 运行时不打包**：MCP 服务端需要 Node.js 18+；未检测到时面板与启动报错都会给出安装指引（nodejs.org LTS 或 `winget install OpenJS.NodeJS.LTS`）。
+- **代码签名**：暂无证书，安装包未签名——Windows 首次安装会弹 SmartScreen「未知发布者」，点「更多信息 → 仍要运行」。后续买到证书再补 Authenticode 签名。
+- **自动更新（Tauri updater）**：
+  - 签名密钥对由 `npx tauri signer generate -w .updater/updater.key` 生成；**私钥只在本机 `.updater/`（已 gitignore，绝不进仓库，丢失则无法再发更新）**，公钥写在 `tauri.conf.json` 的 `plugins.updater.pubkey`。
+  - 端点：`https://heytiger.cn/updates/{{target}}/{{current_version}}`；设置页「检查更新」走该端点，下载后校验签名再安装并重启。
+  - 发布流程：① 提升 `tauri.conf.json` 的 version；② 在 Windows 上设环境变量 `TAURI_SIGNING_PRIVATE_KEY_PATH=.updater/updater.key`（密码为空）后 `npm run tauri build`（`createUpdaterArtifacts: true` 会同时产出 updater 产物与 `.sig`）；③ 把安装包、更新产物与按 Tauri updater 格式生成的 `latest.json`（或动态端点响应）上传到服务器 heytiger.cn 的 `/updates/` 静态目录（Caddy 托管，路径待在服务器侧建好后联调；未建好前设置页检查更新会提示失败，属预期）。

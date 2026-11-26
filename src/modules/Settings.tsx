@@ -100,10 +100,34 @@ export default function Settings({ syncData, onSyncMerge, accountsData, feedback
   const [localMsg, setLocalMsg] = useState("");
   const [localBusy, setLocalBusy] = useState("");
   const [db, setDb] = useState<DbInfo | null>(null);
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [updateNote, setUpdateNote] = useState("");
 
   useEffect(() => {
     void dbInfo().then(setDb).catch(() => {});
   }, []);
+
+  // 项4：Tauri updater 检查更新（端点 heytiger.cn/updates，签名校验）。
+  // 更新服务尚未发布版本时端点返回 404，如实提示而不是报错吓人。
+  const checkUpdate = async () => {
+    if (!tauri) return;
+    setUpdateBusy(true);
+    setUpdateNote("");
+    try {
+      const { check } = await import("@tauri-apps/plugin-updater");
+      const update = await check();
+      if (!update) { setUpdateNote("已是最新版本。"); return; }
+      const go = window.confirm(`发现新版本 ${update.version}（当前 ${update.currentVersion}），现在下载并安装？安装后将自动重启。${update.body ? `\n\n更新说明：${update.body}` : ""}`);
+      if (!go) { setUpdateNote(`已跳过 ${update.version}，可随时再检查。`); return; }
+      setUpdateNote(`正在下载 ${update.version}…`);
+      await update.downloadAndInstall();
+      setUpdateNote("更新已安装，正在重启…");
+      const { relaunch } = await import("@tauri-apps/plugin-process");
+      await relaunch();
+    } catch (e) {
+      setUpdateNote(`检查更新失败：${e instanceof Error ? e.message : String(e)}（若更新服务尚未发布任何版本，这属于正常现象）。`);
+    } finally { setUpdateBusy(false); }
+  };
 
   const refreshStatus = async (silent = false) => {
     if (!tauri) return;
@@ -351,11 +375,23 @@ export default function Settings({ syncData, onSyncMerge, accountsData, feedback
         {agents.length === 0 && <li className="dim">未检测到本地 Agent CLI。</li>}
       </ul>
 
+      <h3>应用更新</h3>
+      <div className="card">
+        <div className="row">
+          <button disabled={!tauri || updateBusy} onClick={() => void checkUpdate()}>
+            {updateBusy ? "检查中…" : "检查更新"}
+          </button>
+          <span className="dim">更新源：heytiger.cn/updates（Tauri updater 签名校验）；浏览器预览模式不可用。</span>
+        </div>
+        {updateNote && <p className="notice">{updateNote}</p>}
+        <p className="hint">提示：安装包暂无代码签名证书，Windows 首次安装会弹 SmartScreen「未知发布者」，点「更多信息 → 仍要运行」即可；自动更新包有 updater 签名校验，不受影响。</p>
+      </div>
+
       <h3>本地数据与安全</h3>
       <ul className="list">
         <li className="card">数据目录（Windows P0）：<span className="mono">%APPDATA%/AnswerMaker/</span></li>
         <li className="card">数据目录（macOS P1）：<span className="mono">~/Library/Application Support/AnswerMaker/</span></li>
-        <li className="card">保险库：PBKDF2 + AES-GCM 加密，密钥只存内存；锁定时仅展示元数据。</li>
+        <li className="card">保险库：桌面端 Argon2id + AES-256-GCM 信封加密（Rust 原生），浏览器/旧数据为 WebCrypto PBKDF2 格式（双读兼容，保存时自然升级）；密钥只存内存，锁定时仅展示元数据。</li>
         <li className="card">业务数据：SQLite <span className="mono">answermaker.db</span>（WAL，与数据目录同层）；首次启动自动从 localStorage 迁移，旧键保留作备份。</li>
         <li className="card">
           <div>当前数据库：<span className="mono">{db?.path ?? "—"}</span></div>

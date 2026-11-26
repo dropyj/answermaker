@@ -419,6 +419,12 @@ export default function Mcp() {
               <br />
               数据目录 {status?.data_dir || "—"} · 日志 {status?.log_file || "—"}
             </div>
+            {!status?.node_version && (
+              <p className="warnbox">
+                MCP 服务端需要 Node.js 18+ 运行时（安装包不打包 Node）。安装方式：打开 https://nodejs.org 下载 LTS 版，
+                或在 Windows 终端执行 <code>winget install OpenJS.NodeJS.LTS</code>；安装完成后重启 AnswerMaker 再点「启动」。
+              </p>
+            )}
           </details>
         </>
       )}

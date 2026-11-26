@@ -94,9 +94,8 @@ fn server_candidates() -> Vec<PathBuf> {
             out.push(PathBuf::from(p));
         }
     }
-    if let Ok(cwd) = std::env::current_dir() {
-        out.push(cwd.join("server").join("mcp-server.mjs"));
-    }
+    // 项4：安装包内的 server/ 优先（tauri.conf.json bundle.resources 把 server/
+    // 与 cli/ 打进安装目录，Windows 上位于 exe 同级或 resources/ 子目录）。
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             out.push(dir.join("server").join("mcp-server.mjs"));
@@ -105,6 +104,10 @@ fn server_candidates() -> Vec<PathBuf> {
             out.push(dir.join("..").join("..").join("..").join("server").join("mcp-server.mjs"));
             out.push(dir.join("..").join("..").join("server").join("mcp-server.mjs"));
         }
+    }
+    // 开发模式回退：从项目目录直接运行（npm run tauri dev 时 cwd 为项目根）。
+    if let Ok(cwd) = std::env::current_dir() {
+        out.push(cwd.join("server").join("mcp-server.mjs"));
     }
     out
 }
@@ -129,6 +132,16 @@ fn display_path(p: &Path) -> String {
     }
 }
 
+fn dir_writable(dir: &Path) -> bool {
+    if fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let probe = dir.join(".writable-probe");
+    let ok = fs::write(&probe, b"ok").is_ok();
+    let _ = fs::remove_file(&probe);
+    ok
+}
+
 fn data_dir_for(server: Option<&Path>) -> PathBuf {
     if let Some(dir) = std::env::var_os("ANSWERMAKER_DATA_DIR") {
         if !dir.is_empty() {
@@ -137,7 +150,13 @@ fn data_dir_for(server: Option<&Path>) -> PathBuf {
     }
     if let Some(server) = server {
         if let Some(parent) = server.parent() {
-            return parent.join("data");
+            let beside = parent.join("data");
+            if dir_writable(&beside) {
+                return beside;
+            }
+            // 项4：安装目录（如 Program Files）只读时，MCP 数据（token/审计/
+            // 知识镜像）落到应用数据目录，并经 ANSWERMAKER_DATA_DIR 传给服务端。
+            return crate::data_dir().join("mcp-data");
         }
     }
     std::env::current_dir()
@@ -442,7 +461,7 @@ fn start_impl() -> Result<McpStatus, String> {
     let data_dir = data_dir_for(Some(&server));
     fs::create_dir_all(&data_dir).map_err(|e| format!("创建数据目录失败：{e}"))?;
     if node_version().is_empty() {
-        return Err("未找到 Node.js，MCP 服务端需要 node。".to_string());
+        return Err("未找到 Node.js：MCP 服务端需要 Node.js 18+ 运行时（安装包不含 Node）。请从 https://nodejs.org 安装 LTS 版，或在 Windows 终端执行 winget install OpenJS.NodeJS.LTS，安装完成后重启 AnswerMaker 再启动。".to_string());
     }
 
     let log_path = data_dir.join("mcp-server.log");
@@ -453,6 +472,9 @@ fn start_impl() -> Result<McpStatus, String> {
     let mut cmd = Command::new("node");
     cmd.arg(&server)
         .current_dir(&server_dir)
+        // 数据目录显式传给服务端：与 data_dir_for 的选择（尤其是安装目录只读
+        // 时的回退目录）保持一致，服务端的 ANSWERMAKER_DATA_DIR 优先级最高。
+        .env("ANSWERMAKER_DATA_DIR", &data_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::from(out))
         .stderr(Stdio::from(err));
