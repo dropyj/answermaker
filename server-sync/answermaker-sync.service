@@ -1,0 +1,17 @@
+[Unit]
+Description=AnswerMaker Sync Service (encrypted packages only)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/answermaker-sync
+ExecStart=/usr/bin/node /home/ubuntu/answermaker-sync/sync-server.mjs
+Environment=AMSYNC_PORT=7362
+Environment=AMSYNC_HOST=127.0.0.1
+Environment=AMSYNC_DATA=/home/ubuntu/answermaker-sync/data
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
