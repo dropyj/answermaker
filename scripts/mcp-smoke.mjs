@@ -4,7 +4,7 @@
 // 可选：SMOKE_VERBOSE=1 打印服务端日志；SMOKE_POPO=1 额外测试 POPO 空间/链接读取。
 
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,6 +21,8 @@ const env = {
   ANSWERMAKER_MCP_PORT: String(port),
   ANSWERMAKER_MCP_TOKEN: token,
   ANSWERMAKER_MCP_TOKEN_FILE: join(tmp, "token.txt"),
+  ANSWERMAKER_MCP_TOKENS_FILE: join(tmp, "tokens.json"),
+  ANSWERMAKER_MCP_AUDIT_FILE: join(tmp, "audit.log"),
   ANSWERMAKER_MCP_RUNTIME_FILE: join(tmp, "runtime.json"),
   ANSWERMAKER_MCP_DEBUG: "1",
 };
@@ -104,8 +106,12 @@ try {
     });
     check("wrong token → 401", badAuth.status === 401);
 
-    const preflight = await request("/mcp", { method: "OPTIONS" });
-    check("CORS preflight", preflight.status === 204 && preflight.headers.get("access-control-allow-origin") === "*");
+    const preflight = await request("/mcp", { method: "OPTIONS", headers: { Origin: "http://127.0.0.1:5173" } });
+    check("CORS localhost origin", preflight.status === 204 && preflight.headers.get("access-control-allow-origin") === "http://127.0.0.1:5173");
+
+    const evil = await request("/mcp", { method: "OPTIONS", headers: { Origin: "https://evil.example.com" } });
+    const evilAcao = evil.headers.get("access-control-allow-origin");
+    check("CORS foreign origin blocked", evil.status === 204 && evilAcao !== "*" && evilAcao !== "https://evil.example.com");
 
     const init = await rpc("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "smoke" } });
     check("initialize", init.status === 200 && init.json?.result?.serverInfo?.name === "answermaker");
@@ -157,6 +163,7 @@ try {
     const status = await rpc("tools/call", { name: "server_status", arguments: {} });
     const statusOut = JSON.parse(status.json?.result?.content?.[0]?.text ?? "{}");
     check("server_status", statusOut.port === port && typeof statusOut.uptimeSec === "number");
+    check("server_status localhost bind", statusOut.bind === "127.0.0.1" && statusOut.lan === false, `bind=${statusOut.bind}`);
 
     const invalid = await rpc("tools/call", { name: "knowledge_search", arguments: {} });
     check("invalid params → -32602", invalid.json?.error?.code === -32602);
@@ -170,6 +177,84 @@ try {
       ],
     });
     check("batch request", Array.isArray(batch.json) && batch.json.length === 2);
+
+    // ---- V0.3 安全组：多 Token 热加载/撤销、审计留痕、局域网显式开启 ----
+    const tokensPath = join(tmp, "tokens.json");
+    const auditPath = join(tmp, "audit.log");
+    const secondToken = "smoke_second_" + Math.random().toString(36).slice(2);
+    try {
+      const clients = JSON.parse(readFileSync(tokensPath, "utf8"));
+      clients.push({ id: "c_smoke2", name: "smoke-second", token: secondToken, createdAt: Date.now(), lastUsedAt: 0, revoked: false });
+      writeFileSync(tokensPath, JSON.stringify(clients, null, 2));
+      const bump1 = new Date(Date.now() + 5000);
+      utimesSync(tokensPath, bump1, bump1); // 确保 mtime 变化，触发服务端热加载
+      const second = await rpc("tools/list", undefined, secondToken);
+      check("second client token works", second.status === 200 && Array.isArray(second.json?.result?.tools));
+
+      const clients2 = JSON.parse(readFileSync(tokensPath, "utf8"));
+      const c2 = clients2.find((c) => c.name === "smoke-second");
+      if (c2) c2.revoked = true;
+      writeFileSync(tokensPath, JSON.stringify(clients2, null, 2));
+      const bump2 = new Date(Date.now() + 10000);
+      utimesSync(tokensPath, bump2, bump2);
+      const revoked = await rpc("tools/list", undefined, secondToken);
+      check("revoked token → 401", revoked.status === 401);
+    } catch (e) {
+      check("multi-token flow", false, String(e?.message ?? e));
+    }
+
+    try {
+      const auditText = readFileSync(auditPath, "utf8");
+      check("audit log written", auditText.includes('"event":"auth_fail"') && auditText.includes('"event":"tool_call"'));
+      check("audit log has no secrets", !auditText.includes(token) && !auditText.includes(secondToken));
+
+      const refs = await rpc("tools/call", { name: "vault_list_refs", arguments: {} });
+      const refsOut = JSON.parse(refs.json?.result?.content?.[0]?.text ?? "{}");
+      const firstRef = refsOut.refs?.[0];
+      if (firstRef?.ref) {
+        const sec = await rpc("tools/call", { name: "vault_get_secret", arguments: { ref: firstRef.ref, waitMs: 0 } });
+        const secOut = JSON.parse(sec.json?.result?.content?.[0]?.text ?? "{}");
+        const audit2 = readFileSync(auditPath, "utf8");
+        check("secret_request audited", secOut.status === "pending" && audit2.includes('"event":"secret_request"') && audit2.includes(firstRef.ref));
+        try { rmSync(join(root, "server", "data", "secret-requests", secOut.requestId + ".json"), { force: true }); } catch { /* ignore */ }
+      } else {
+        check("secret_request audited", true, "skip（无保险库引用）");
+      }
+    } catch (e) {
+      check("audit flow", false, String(e?.message ?? e));
+    }
+
+    {
+      const lanPort = port + 500;
+      const lanTmp = mkdtempSync(join(tmpdir(), "am-mcp-smoke-lan-"));
+      const lanChild = spawn(process.execPath, [join(root, "server", "mcp-server.mjs")], {
+        env: {
+          ...process.env,
+          ANSWERMAKER_MCP_PORT: String(lanPort),
+          ANSWERMAKER_MCP_TOKEN: token,
+          ANSWERMAKER_MCP_LAN: "1",
+          ANSWERMAKER_MCP_TOKEN_FILE: join(lanTmp, "token.txt"),
+          ANSWERMAKER_MCP_TOKENS_FILE: join(lanTmp, "tokens.json"),
+          ANSWERMAKER_MCP_AUDIT_FILE: join(lanTmp, "audit.log"),
+          ANSWERMAKER_MCP_RUNTIME_FILE: join(lanTmp, "runtime.json"),
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      try {
+        let healthJson = null;
+        for (let i = 0; i < 40 && !healthJson; i++) {
+          try {
+            const h = await fetch(`http://127.0.0.1:${lanPort}/health`, { signal: AbortSignal.timeout(2000) });
+            if (h.ok) healthJson = await h.json().catch(() => null);
+          } catch { /* retry */ }
+          if (!healthJson) await new Promise((r) => setTimeout(r, 200));
+        }
+        check("LAN mode binds 0.0.0.0", healthJson?.bind === "0.0.0.0" && healthJson?.lan === true, `bind=${healthJson?.bind}`);
+      } finally {
+        lanChild.kill("SIGTERM");
+        try { rmSync(lanTmp, { recursive: true, force: true }); } catch { /* ignore */ }
+      }
+    }
 
     if (withPopo) {
       const spaces = await rpc("tools/call", { name: "popo_spaces", arguments: {} });

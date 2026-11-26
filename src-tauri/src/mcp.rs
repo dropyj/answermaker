@@ -57,6 +57,8 @@ pub struct McpStatus {
     pub pid: u32,
     pub endpoint: String,
     pub lan_ip: String,
+    pub bind: String,
+    pub lan: bool,
     pub token: String,
     pub token_source: String,
     pub uptime_sec: u64,
@@ -347,11 +349,15 @@ fn status_impl() -> Result<McpStatus, String> {
         .as_ref()
         .map(|h| h["name"].as_str() == Some("answermaker-mcp"))
         .unwrap_or(false);
+    let mut bind = "127.0.0.1".to_string();
+    let mut lan = false;
     if let (true, Some(h)) = (running, health.as_ref()) {
         port = h["port"].as_u64().unwrap_or(port as u64) as u16;
         pid = h["pid"].as_u64().unwrap_or(pid as u64) as u32;
         uptime_sec = h["uptimeSec"].as_u64().unwrap_or(0);
         version = h["version"].as_str().unwrap_or("").to_string();
+        bind = h["bind"].as_str().unwrap_or("127.0.0.1").to_string();
+        lan = h["lan"].as_bool().unwrap_or(false);
     }
 
     let ip = lan_ip();
@@ -366,8 +372,14 @@ fn status_impl() -> Result<McpStatus, String> {
         running,
         port,
         pid: if running { pid } else { 0 },
-        endpoint: format!("http://{ip}:{port}/mcp"),
+        // 本机模式下端点给 127.0.0.1，局域网模式才给局域网 IP（与服务端实际绑定一致）。
+        endpoint: format!(
+            "http://{}:{}/mcp",
+            if lan { ip.clone() } else { "127.0.0.1".to_string() }
+        ),
         lan_ip: ip,
+        bind,
+        lan,
         token,
         token_source,
         uptime_sec,
@@ -444,6 +456,10 @@ fn start_impl() -> Result<McpStatus, String> {
         .stdin(Stdio::null())
         .stdout(Stdio::from(out))
         .stderr(Stdio::from(err));
+    // 默认不传 LAN 变量：服务端只听本机；面板显式开启局域网后才传。
+    if LAN_ENABLED.load(Ordering::SeqCst) {
+        cmd.env("ANSWERMAKER_MCP_LAN", "1");
+    }
     hide(&mut cmd);
     let mut child = cmd
         .spawn()
@@ -527,6 +543,16 @@ pub fn mcp_set_follow_main(enabled: bool) {
     FOLLOW_MAIN.store(enabled, Ordering::SeqCst);
 }
 
+/// 面板设置：局域网访问开关（默认关）。开启后拉起服务时才传
+/// ANSWERMAKER_MCP_LAN=1；关闭（默认）不传任何变量，服务端只绑定
+/// 127.0.0.1。局域网是 PRD 的产品能力，但必须显式开启，不默认暴露。
+static LAN_ENABLED: AtomicBool = AtomicBool::new(false);
+
+#[tauri::command]
+pub fn mcp_set_lan(enabled: bool) {
+    LAN_ENABLED.store(enabled, Ordering::SeqCst);
+}
+
 /// App 退出时调用；仅在「跟随主进程」开启时停止服务。
 pub fn stop_if_following() {
     if FOLLOW_MAIN.load(Ordering::SeqCst) {
@@ -564,6 +590,173 @@ fn rotate_impl() -> Result<McpStatus, String> {
 #[tauri::command]
 pub async fn mcp_rotate_token() -> Result<McpStatus, String> {
     blocking(rotate_impl).await
+}
+
+// ---------- client tokens & audit (server/data) ----------
+// 与服务端/CLI 共用同一份 tokens.json：[{id,name,token,createdAt,lastUsedAt,revoked}]。
+// 服务端按文件 mtime 热加载，应用在这里增删/撤销后对运行中的服务立即生效。
+
+fn tokens_path(data: &Path) -> PathBuf {
+    data.join("tokens.json")
+}
+
+fn load_token_clients(data: &Path) -> Vec<Value> {
+    let path = tokens_path(data);
+    if let Some(v) = read_json(&path) {
+        if let Some(arr) = v.as_array() {
+            return arr.clone();
+        }
+    }
+    // 与服务端一致：不存在时用旧来源（env / mcp-token.txt）初始化 default 客户端。
+    let (token, _source) = read_token(data);
+    if token.is_empty() {
+        return Vec::new();
+    }
+    let clients = vec![json!({
+        "id": "default",
+        "name": "default",
+        "token": token,
+        "createdAt": now_ms(),
+        "lastUsedAt": 0,
+        "revoked": false,
+    })];
+    let _ = write_json_file(&path, &Value::Array(clients.clone()));
+    clients
+}
+
+fn save_token_clients(data: &Path, clients: &[Value]) -> Result<(), String> {
+    write_json_file(&tokens_path(data), &Value::Array(clients.to_vec()))
+}
+
+/// 客户端 Token 列表：只返回名称/创建时间/最后使用/状态，绝不返回 Token 值。
+#[tauri::command]
+pub async fn mcp_tokens_list() -> Result<Vec<Value>, String> {
+    blocking(|| {
+        let data = server_data_dir()?;
+        Ok(load_token_clients(&data)
+            .iter()
+            .map(|c| {
+                json!({
+                    "id": c["id"].as_str().unwrap_or(""),
+                    "name": c["name"].as_str().unwrap_or(""),
+                    "createdAt": c["createdAt"].as_u64().unwrap_or(0),
+                    "lastUsedAt": c["lastUsedAt"].as_u64().unwrap_or(0),
+                    "revoked": c["revoked"].as_bool().unwrap_or(false),
+                })
+            })
+            .collect())
+    })
+    .await
+}
+
+/// 新增客户端：Token 只在这一次的返回值里完整出现，之后列表不再显示。
+#[tauri::command]
+pub async fn mcp_token_add(name: String) -> Result<Value, String> {
+    blocking(move || {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return Err("客户端名称不能为空".to_string());
+        }
+        let data = server_data_dir()?;
+        let mut clients = load_token_clients(&data);
+        if clients.iter().any(|c| {
+            c["name"].as_str() == Some(name.as_str()) && !c["revoked"].as_bool().unwrap_or(false)
+        }) {
+            return Err(format!("已存在同名有效客户端：{name}"));
+        }
+        let entry = json!({
+            "id": format!("c_{}", &random_token()[3..11]),
+            "name": name,
+            "token": random_token(),
+            "createdAt": now_ms(),
+            "lastUsedAt": 0,
+            "revoked": false,
+        });
+        clients.push(entry.clone());
+        save_token_clients(&data, &clients)?;
+        Ok(entry)
+    })
+    .await
+}
+
+/// 撤销某客户端 Token（按名称或 id）；服务端热加载后立即失效。
+#[tauri::command]
+pub async fn mcp_token_revoke(name: String) -> Result<(), String> {
+    blocking(move || {
+        let data = server_data_dir()?;
+        let mut clients = load_token_clients(&data);
+        let mut found = false;
+        for c in clients.iter_mut() {
+            let matched = c["name"].as_str() == Some(name.as_str())
+                || c["id"].as_str() == Some(name.as_str());
+            if matched && !c["revoked"].as_bool().unwrap_or(false) {
+                c["revoked"] = json!(true);
+                found = true;
+            }
+        }
+        if !found {
+            return Err(format!("未找到有效的客户端：{name}"));
+        }
+        save_token_clients(&data, &clients)
+    })
+    .await
+}
+
+/// 审计只读：返回 server/data/audit.log 最后 limit 行（JSONL 解析后）。
+#[tauri::command]
+pub async fn mcp_audit_tail(limit: Option<u64>) -> Result<Vec<Value>, String> {
+    blocking(move || {
+        let data = server_data_dir()?;
+        let text = fs::read_to_string(data.join("audit.log")).unwrap_or_default();
+        let n = limit.unwrap_or(20).clamp(1, 200) as usize;
+        let lines: Vec<&str> = text.lines().collect();
+        let start = lines.len().saturating_sub(n);
+        Ok(lines[start..]
+            .iter()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .collect())
+    })
+    .await
+}
+
+/// append-only 审计（与服务端 audit.log 同一 JSONL 格式；绝不写 Token/密钥明文）。
+fn append_audit(data: &Path, event: &str, reference: &str, result: &str) {
+    let line = json!({
+        "ts": iso_from_ms(now_ms()),
+        "client": "app",
+        "event": event,
+        "tool": "vault_get_secret",
+        "ref": reference,
+        "result": result,
+    });
+    if let Ok(mut f) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(data.join("audit.log"))
+    {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
+/// 毫秒时间戳 → ISO 8601（UTC），与服务端 `new Date().toISOString()` 格式一致。
+fn iso_from_ms(ms: u64) -> String {
+    let secs = (ms / 1000) as i64;
+    let millis = ms % 1000;
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (h, mi, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    // civil-from-days（Howard Hinnant 算法）
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}.{millis:03}Z")
 }
 
 // ---------- data sync (app → server/data) ----------
@@ -780,6 +973,9 @@ fn deny_secret_impl(id: String, reason: String) -> Result<(), String> {
     if !req.exists() {
         return Err("请求不存在或已过期".to_string());
     }
+    let reference = read_json(&req)
+        .and_then(|v| v["ref"].as_str().map(str::to_string))
+        .unwrap_or_default();
     let reason: String = reason.chars().take(200).collect();
     write_json_file(
         &secret_response_dir(&data).join(format!("{id}.json")),
@@ -790,6 +986,7 @@ fn deny_secret_impl(id: String, reason: String) -> Result<(), String> {
             "createdAt": now_ms(),
         }),
     )?;
+    append_audit(&data, "secret_status", &reference, "denied");
     let _ = fs::remove_file(&req);
     Ok(())
 }
@@ -843,6 +1040,7 @@ fn fulfill_secret_impl(id: String, secret: String, ttl_sec: Option<u64>) -> Resu
             "createdAt": now_ms(),
         }),
     )?;
+    append_audit(&data, "secret_status", &reference, "ok");
     let _ = fs::remove_file(&req);
     Ok(display_path(&file))
 }

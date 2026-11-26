@@ -15,9 +15,14 @@
 //   answermaker mcp config                 输出可粘贴的 MCP 配置 JSON
 //   answermaker mcp status                 查看 MCP 运行状态
 //   answermaker mcp start                  拉起 MCP 服务端
+//   answermaker token list                 列出客户端 Token（不显示值）
+//   answermaker token add <name>           新增客户端 Token（值只完整显示这一次）
+//   answermaker token revoke <name>        撤销某客户端 Token
+//   answermaker audit tail [n]             查看最近 n 条审计记录（默认 20）
 // 数据文件可用环境变量 ANSWERMAKER_DATA_DIR 指向其他目录。
 
-import { readFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { networkInterfaces } from "node:os";
@@ -28,6 +33,8 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const dataDir = process.env.ANSWERMAKER_DATA_DIR || join(root, "server", "data");
 const PORT = Number(process.env.ANSWERMAKER_MCP_PORT || 7361);
 const TOKEN_FILE = process.env.ANSWERMAKER_MCP_TOKEN_FILE || join(dataDir, "mcp-token.txt");
+const TOKENS_FILE = process.env.ANSWERMAKER_MCP_TOKENS_FILE || join(dataDir, "tokens.json");
+const AUDIT_FILE = process.env.ANSWERMAKER_MCP_AUDIT_FILE || join(dataDir, "audit.log");
 const RUNTIME_FILE = process.env.ANSWERMAKER_MCP_RUNTIME_FILE || join(dataDir, "mcp-runtime.json");
 
 function loadJson(name, fallback) {
@@ -95,6 +102,25 @@ function fileSearch(query, limit = 10) {
 
 function fmtTime(ms) {
   return ms ? new Date(ms).toLocaleString() : "—";
+}
+
+// 与服务端一致的多客户端 Token 存储（server/data/tokens.json）。
+// 文件不存在时用旧来源（env / mcp-token.txt）初始化出 default 客户端。
+function loadTokenClients(initIfMissing = false) {
+  try {
+    const parsed = JSON.parse(readFileSync(TOKENS_FILE, "utf8"));
+    if (Array.isArray(parsed)) return parsed;
+  } catch { /* fall through */ }
+  if (!initIfMissing) return [];
+  const legacy = (process.env.ANSWERMAKER_MCP_TOKEN || readToken() || "").trim();
+  const seed = legacy
+    ? [{ id: "default", name: "default", token: legacy, createdAt: Date.now(), lastUsedAt: 0, revoked: false }]
+    : [];
+  if (seed.length) saveTokenClients(seed);
+  return seed;
+}
+function saveTokenClients(clients) {
+  writeFileSync(TOKENS_FILE, JSON.stringify(clients, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
 }
 
 async function main() {
@@ -261,6 +287,61 @@ async function main() {
     return;
   }
 
+  if (cmd === "token" && sub === "list") {
+    const clients = loadTokenClients();
+    if (!clients.length) { console.log("（暂无客户端 Token 记录；启动一次 MCP 服务或执行 token add 后生成）"); return; }
+    for (const c of clients) {
+      console.log(`${c.name}\t${c.revoked ? "已撤销" : "有效"}\t创建=${fmtTime(c.createdAt)}\t最后使用=${fmtTime(c.lastUsedAt)}`);
+    }
+    return;
+  }
+
+  if (cmd === "token" && sub === "add") {
+    const name = rest.join(" ").trim();
+    if (!name) { console.error("用法：answermaker token add <name>"); process.exit(1); }
+    const clients = loadTokenClients(true);
+    if (clients.some((c) => c.name === name && !c.revoked)) { console.error(`已存在同名有效客户端：${name}`); process.exit(1); }
+    const entry = {
+      id: "c_" + randomBytes(4).toString("hex"),
+      name,
+      token: "am_" + randomBytes(24).toString("hex"),
+      createdAt: Date.now(),
+      lastUsedAt: 0,
+      revoked: false,
+    };
+    clients.push(entry);
+    saveTokenClients(clients);
+    console.log(`已新增客户端「${name}」。Token 只完整显示这一次，请妥善保存：`);
+    console.log(entry.token);
+    console.log("（运行中的 MCP 服务会自动热加载，无需重启；list 不再显示 Token 值）");
+    return;
+  }
+
+  if (cmd === "token" && sub === "revoke") {
+    const name = rest.join(" ").trim();
+    if (!name) { console.error("用法：answermaker token revoke <name>"); process.exit(1); }
+    const clients = loadTokenClients(true);
+    const target = clients.find((c) => (c.name === name || c.id === name) && !c.revoked);
+    if (!target) { console.error(`未找到有效的客户端：${name}`); process.exit(1); }
+    target.revoked = true;
+    saveTokenClients(clients);
+    console.log(`已撤销客户端「${target.name}」的 Token（运行中的服务会自动热加载，立即生效）。`);
+    return;
+  }
+
+  if (cmd === "audit" && sub === "tail") {
+    const n = Math.max(1, Math.min(500, Number(rest[0]) || 20));
+    if (!existsSync(AUDIT_FILE)) { console.log("（暂无审计记录；MCP 服务产生鉴权/调用后会写入 server/data/audit.log）"); return; }
+    const lines = readFileSync(AUDIT_FILE, "utf8").trim().split("\n").filter(Boolean).slice(-n);
+    for (const line of lines) {
+      try {
+        const e = JSON.parse(line);
+        console.log(`${e.ts}\t${e.client ?? "-"}\t${e.event}\t${e.tool ?? ""}\t${e.ref ?? ""}\t${e.result ?? ""}`);
+      } catch { console.log(line); }
+    }
+    return;
+  }
+
   if (cmd === "mcp" && sub === "config") {
     const { port, running } = await runningPort();
     const token = process.env.ANSWERMAKER_MCP_TOKEN || readToken() || "<启动服务后自动生成 Token>";
@@ -317,7 +398,11 @@ async function main() {
   answermaker popo ls <teamSpaceId> [folderId] 列团队空间目录
   answermaker mcp config                    输出 MCP 配置 JSON
   answermaker mcp status                    查看 MCP 服务运行状态
-  answermaker mcp start                     启动 MCP 服务端（端口 ${PORT}）`);
+  answermaker mcp start                     启动 MCP 服务端（端口 ${PORT}）
+  answermaker token list                    列出客户端 Token（名称/状态/最后使用，不显示值）
+  answermaker token add <name>              新增客户端 Token（值只显示一次）
+  answermaker token revoke <name>           撤销某客户端 Token
+  answermaker audit tail [n]                查看最近 n 条审计记录（默认 20）`);
 }
 
 main().catch((e) => {

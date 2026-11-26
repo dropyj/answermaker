@@ -279,7 +279,7 @@ am mcp status|config|start
 - MCP：默认无 Token 拒绝；保险库只暴露 `vault://` 引用；密钥取用需应用内逐次授权 + 临时文件 + TTL
 - 密钥文件：随机 id、路径校验、Unix 0600；服务端只删除自身目录内文件
 - 在线鉴权：凭据由 popo-cli 管理，应用不接触 token
-- 已知风险：CSP 为 null；MCP 监听 0.0.0.0 且 `Access-Control-Allow-Origin: *`（靠 Token）；单 Token 无审计；临时文件为明文
+- 已知风险：CSP 为 null（未处理）；临时文件为明文。MCP 暴露面已收敛（V0.3 安全组）：默认只绑定 127.0.0.1、本机模式 CORS 仅限本机来源、局域网需显式开启（开启时 CORS 为 *，靠多客户端 Token + 审计约束）
 
 ---
 
@@ -299,6 +299,7 @@ am mcp status|config|start
 - [x] 主题色 #7f71f1、Font Awesome 图标、无全页滚动 + 自定义滚动条
 - [x] 设置：OpenID 状态、Ollama/Agent、SQLite 路径与数据量
 - [x] MCP smoke 20/20（POPO 22/22）；Rust 密钥写入单测；`npm run build` 通过
+- [x] **V0.3 安全组第一批**：MCP 默认本机绑定 + 局域网显式开关与 CORS 收敛（server_status/health 带 bind/lan）；多客户端 Token 与撤销（tokens.json 热加载，CLI 与面板可管理）；密钥取用/鉴权审计（audit.log JSONL + 面板最近 20 条 + CLI audit tail）；剪贴板 30 秒比对后自动清空；保险库闲置 5 分钟自动锁定（可关）；MCP smoke 扩至 28/28
 
 ---
 
@@ -307,10 +308,10 @@ am mcp status|config|start
 ### P0 — 安全 / 正确性
 
 1. **Rust 保险库实现**：`vault_crypto.rs` 仍为占位；目标 Argon2id + OS 钥匙串，替代前端 PBKDF2；设计迁移路径（保持现有密文可解密）。
-2. **MCP 密钥取用审计**：记录请求人（Token 标识）、ref、用途、授权/拒绝、时间、过期，UI 可查；当前无审计。
-3. **多 Token / 按客户端授权与撤销**：当前单一 Token；需 per-client Token、吊销、最后使用时间。
+2. **MCP 密钥取用审计**：✅ V0.3 已落地：服务端 append-only 写 `server/data/audit.log`（JSONL：ts/client/event/tool/ref/purpose/result），覆盖鉴权失败、工具调用、密钥申请/状态查询/释放；应用授权/拒绝经 Rust 回写同一日志；MCP 面板有最近 20 条只读列表，CLI 有 `audit tail`；绝不记录 Token 值与密钥明文。
+3. **多 Token / 按客户端授权与撤销**：✅ V0.3 已落地：`server/data/tokens.json` 多客户端存储（{id,name,token,createdAt,lastUsedAt,revoked}），旧 env / mcp-token.txt 兼容为 default 客户端；服务端按文件 mtime 热加载，撤销即时生效、lastUsedAt 60 秒节流落盘；CLI `token list|add|revoke` 与 MCP 面板均可管理，Token 只在新增时完整显示一次。
 4. **临时文件安全加固**：Windows ACL 收紧、应用/服务退出清理、崩溃残留扫描；可选「一次性读取即删除」。
-5. **CSP 与 MCP 暴露面**：设置 Tauri CSP；评估 MCP 是否默认只监听 127.0.0.1，局域网模式显式开启；限制 CORS 来源。
+5. **CSP 与 MCP 暴露面**：MCP 暴露面 ✅ V0.3 已落地：默认只监听 127.0.0.1；局域网模式显式开启（`ANSWERMAKER_MCP_LAN=1` / `ANSWERMAKER_MCP_HOST` / 面板开关，开启时启动日志与面板有风险提示）；本机模式 CORS 仅允许 127.0.0.1/localhost 来源，局域网模式保留 *。剩余：Tauri CSP 仍为 null，不在本批范围。
 6. **崩溃场景的 MCP 回收**：当前仅正常退出时按勾选停止；强杀/崩溃会留下服务进程，需 Job Object（Windows）或父进程看护。
 7. **打包可用性**：`server/` 与 Node 运行时未随安装包分发；需 resources/sidecar 打包或内置服务，并在缺 Node 时给出可用方案。
 8. **数据库运维**：schema 版本迁移、备份/恢复/导出 UI、损坏检测与恢复提示。

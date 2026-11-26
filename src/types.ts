@@ -82,6 +82,7 @@ export interface SecretRequest {
   key: string;
   type: string;
   ref: string;
+  client?: string;
   purpose?: string;
   ttlSec?: number;
   createdAt?: number;

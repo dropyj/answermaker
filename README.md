@@ -85,7 +85,7 @@ npm run build      # tsc + vite 生产构建（V0.2 已验证通过）
 ```bash
 npm run mcp:start
 # 或指定 Token：ANSWERMAKER_MCP_TOKEN=my-token node server/mcp-server.mjs
-# 服务端默认监听 http://0.0.0.0:7361/mcp（端口可用 ANSWERMAKER_MCP_PORT 改）
+# 服务端默认只监听 http://127.0.0.1:7361/mcp（端口可用 ANSWERMAKER_MCP_PORT 改）；ANSWERMAKER_MCP_LAN=1 才开放局域网
 # 端口占用会自动 +1 顺延（最多 20 次）；首次启动生成 server/data/mcp-token.txt 并复用
 
 npm run cli -- vault list                 # 列出保险库引用（只含 vault:// 与元数据）
@@ -102,6 +102,10 @@ npm run cli -- popo ls <teamSpaceId> [folderId] # 团队空间目录
 npm run cli -- mcp config                 # 输出 MCP 配置 JSON（自动读取运行端口与 Token）
 npm run cli -- mcp status                 # 查看运行状态、端口、Token 与健康信息
 npm run cli -- mcp start                  # 拉起 MCP 服务端
+npm run cli -- token list                 # 列出客户端 Token（名称/状态/最后使用，不显示值）
+npm run cli -- token add <name>           # 新增客户端 Token（值只完整显示一次）
+npm run cli -- token revoke <name>        # 撤销某客户端 Token（服务热加载，立即生效）
+npm run cli -- audit tail [n]             # 查看最近 n 条审计记录（默认 20）
 ```
 
 MCP 服务端实现 JSON-RPC：`initialize`、`ping`、`tools/list`、`tools/call`；支持批量请求与 CORS 预检；无/错 Token 返回 401。
@@ -133,6 +137,9 @@ MCP 服务端实现 JSON-RPC：`initialize`、`ping`、`tools/list`、`tools/cal
 - **随主进程关闭**：面板勾选「关闭应用时同时停止 MCP 服务」（默认勾选）；勾选时退出应用会停止服务，取消勾选则服务继续在后台运行。偏好保存在 localStorage，启动时同步给 Rust。
 - **状态**：局域网端点、端口、PID、运行时长、版本、Token 来源（文件 / 环境变量）、Node 版本
 - **Token**：显示 / 复制 / 重新生成（写入 `mcp-token.txt`，运行中自动重启生效）
+- **监听范围**：默认仅本机 127.0.0.1；面板可显式开启局域网访问（绑定 0.0.0.0，带风险提示，下次启动生效），本机模式下配置 JSON 使用 127.0.0.1 端点
+- **多客户端 Token**：`server/data/tokens.json` 按客户端存储，可在面板或 CLI（`am token add/revoke`）增删撤销；Token 只在新增时显示一次，服务端热加载立即生效
+- **审计**：鉴权失败、工具调用与密钥取用写入 `server/data/audit.log`（JSONL，不含 Token 值与密钥明文）；面板展示最近 20 条，CLI 用 `am audit tail` 查看
 - **自检**：发送 `initialize` + `tools/list`，返回工具数与耗时
 - **数据量**：知识文档、文件/链接、保险库引用数量及两份导出的更新时间
 - 打包版需随应用附带 `server/` 目录，或设置 `ANSWERMAKER_MCP_SERVER` 指向 `mcp-server.mjs`
@@ -170,7 +177,11 @@ ANSWERMAKER_MCP_DEBUG=1 npm run mcp:start   # 输出请求、工具参数与耗�
 | --- | --- | --- |
 | `ANSWERMAKER_MCP_PORT` | `7361` | 基础端口；占用时自动 +1（最多 20 次） |
 | `ANSWERMAKER_MCP_TOKEN` | — | 显式 Token；未设置时读取/生成 Token 文件 |
-| `ANSWERMAKER_MCP_TOKEN_FILE` | `server/data/mcp-token.txt` | Token 持久化文件（gitignored） |
+| `ANSWERMAKER_MCP_TOKEN_FILE` | `server/data/mcp-token.txt` | 默认客户端 Token 持久化文件（gitignored） |
+| `ANSWERMAKER_MCP_TOKENS_FILE` | `server/data/tokens.json` | 多客户端 Token 存储（gitignored） |
+| `ANSWERMAKER_MCP_AUDIT_FILE` | `server/data/audit.log` | 审计日志 JSONL（gitignored） |
+| `ANSWERMAKER_MCP_LAN` | — | `1` 时监听 0.0.0.0 开放局域网；默认只听 127.0.0.1 |
+| `ANSWERMAKER_MCP_HOST` | — | 显式指定绑定地址（指定非本机地址等同开启局域网） |
 | `ANSWERMAKER_MCP_RUNTIME_FILE` | `server/data/mcp-runtime.json` | 运行端口/pid（gitignored） |
 | `ANSWERMAKER_DATA_DIR` | `server/data` | `knowledge.json` / `vault-refs.json` 目录 |
 | `ANSWERMAKER_MCP_DEBUG` | — | `1` 开启详细日志 |
@@ -330,6 +341,13 @@ popo-cli auth login     # 浏览器 OpenID 登录（CLI 自动打开浏览器）
 - **聊天区 UI**：CodeMaker 风格圆角输入框（随内容自动增高、模型/Agent/模式 chips、纸飞机发送按钮：默认浅色主题色、hover 填充并微抬升、禁用态灰化；Enter/Shift+Enter 提示在宽屏显示）；各按钮均有 hover / focus-visible / active 反馈。右侧「对话轮次」列表按用户轮次展示，带「聊天 / RAG / 搜索」类型徽标，点击可平滑跳转到对应消息。
 - 三栏布局与 V0.1 的模型/模式切换、MCP 网关面板、匹配识别候选清单（模拟识别结果，确认后加密入库）等保持不变。
 
+## V0.3 已实现（安全组第一批）
+
+- **MCP 默认只听本机**：服务端默认绑定 127.0.0.1，本机模式 CORS 仅允许本机来源；局域网需显式开启（环境变量 `ANSWERMAKER_MCP_LAN=1` 或应用面板开关），开启时启动日志与面板均有风险提示，`server_info` / `server_status` / 健康检查返回 `bind` / `lan`
+- **多客户端 Token**：`tokens.json` 按客户端管理（名称/创建时间/最后使用/撤销），旧 env / `mcp-token.txt` 兼容为 default；服务端按文件 mtime 热加载，新增/撤销无需重启
+- **审计**：`audit.log`（JSONL，append-only）记录 auth_fail / tool_call / secret_request / secret_status / secret_release，含申请客户端名、ref、用途与结果；应用授权/拒绝经 Rust 回写同一日志；不记录 Token 值与密钥明文
+- **保险库前端安全**：复制条目明文 JSON 后 30 秒自动清空剪贴板（清空前读回比对，避免误删用户新复制内容）；解锁后闲置 5 分钟自动锁定（可在保险库页关闭，默认开）
+
 ## V0.2 未实现（如实标注）
 
 - **Rust 原生**：已在本机编译通过（`cargo check` / `tauri dev`）；`vault_crypto.rs` 的 Argon2id 实现仍为占位（桌面端加密以 WebCrypto 版为当前可用实现）
@@ -343,5 +361,5 @@ popo-cli auth login     # 浏览器 OpenID 登录（CLI 自动打开浏览器）
 
 ## 后续路线
 
-- **V0.3**：保险库从 WebCrypto 迁移到 Rust Argon2id + `.enc` 落盘与系统钥匙串；MCP 服务端由桌面进程托管（端口顺延、Token 轮换/审计 UI 与 Node 版对齐）；PDF 解析；在线文档自动同步（ETag/版本校验 + 权限/删除同步）；聊天接 OpenAI/Claude
+- **V0.3**：安全组第一批已完成（见上）；剩余：保险库从 WebCrypto 迁移到 Rust Argon2id + `.enc` 落盘与系统钥匙串；PDF 解析；在线文档自动同步（ETag/版本校验 + 权限/删除同步）；聊天接 OpenAI/Claude
 - **V1.0**：macOS（P1）适配与打包（含 icon.icns）、知识库迁移 SQLite FTS5/向量索引 + bge-m3 混合检索、云端向量库（当前仅预留接口，备注待开发，转排期前需补齐设计）

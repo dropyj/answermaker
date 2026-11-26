@@ -10,6 +10,21 @@ import {
 
 const TYPES: VaultType[] = ["ssh key", "api key", "account", "token", "certificate", "file"];
 
+const AUTOLOCK_KEY = "am_vault_autolock";
+const AUTOLOCK_MS = 5 * 60 * 1000;
+
+/** 复制敏感内容后 30 秒自动清空剪贴板：清空前先读回比对，仍是刚复制的
+ * 内容才清，避免误删用户期间新复制的东西；读不到剪贴板（浏览器预览或
+ * 权限不足）时跳过清空，不强行写空串误伤用户。 */
+function scheduleClipboardClear(text: string) {
+  window.setTimeout(async () => {
+    try {
+      const current = await navigator.clipboard.readText();
+      if (current === text) await navigator.clipboard.writeText("");
+    } catch { /* 无法读回时不强行清空 */ }
+  }, 30_000);
+}
+
 interface Candidate { id: string; name: string; kind: string; prefill: Partial<VaultItem>; confidence: "高" | "中" | "低"; checked: boolean }
 const SCAN_CANDIDATES: Candidate[] = [
   { id: "c1", name: "~/.ssh/id_ed25519", kind: "私钥头 BEGIN OPENSSH PRIVATE KEY", prefill: { key: "ssh", type: "ssh key", value: "-----BEGIN OPENSSH PRIVATE KEY----- ..." }, confidence: "高", checked: true },
@@ -42,9 +57,42 @@ export default function Vault({
   const [editKey, setEditKey] = useState("");
   const [editType, setEditType] = useState<VaultType>("api key");
   const [editUrl, setEditUrl] = useState("");
+  const [autoLock, setAutoLock] = useState(() => {
+    try { return localStorage.getItem(AUTOLOCK_KEY) !== "0"; } catch { return true; }
+  });
 
   const refresh = () => { setEncItems(listEncItems()); setHasMeta(hasVaultMeta()); setLegacy(readLegacyItems()); };
   useEffect(() => { refresh(); }, []);
+
+  const changeAutoLock = (enabled: boolean) => {
+    setAutoLock(enabled);
+    try { localStorage.setItem(AUTOLOCK_KEY, enabled ? "1" : "0"); } catch { /* ignore */ }
+  };
+
+  // 闲置自动锁定：解锁后 5 分钟无鼠标/键盘活动则清除会话密钥。
+  // 本面板仅在保险库分区挂载，切换分区即卸载、计时取消，活动口径即「保险库页内活动」。
+  useEffect(() => {
+    if (!unlocked || !autoLock) return;
+    let timer = 0;
+    const arm = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        lockVault();
+        setUnlocked(false);
+        setNotice("闲置超过 5 分钟，保险库已自动锁定（会话密钥已从内存清除）。");
+      }, AUTOLOCK_MS);
+    };
+    arm();
+    window.addEventListener("mousedown", arm);
+    window.addEventListener("keydown", arm);
+    window.addEventListener("click", arm);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("mousedown", arm);
+      window.removeEventListener("keydown", arm);
+      window.removeEventListener("click", arm);
+    };
+  }, [unlocked, autoLock]);
 
   const doSetup = async () => {
     setError(""); setNotice("");
@@ -86,9 +134,12 @@ export default function Vault({
     try {
       const item = await decryptVaultItem(enc);
       const payload = { id: item.id, key: item.key, value: item.value, type: item.type, account: item.account, url: item.url };
-      await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+      const text = JSON.stringify(payload, null, 2);
+      await navigator.clipboard.writeText(text);
       setCopied(enc.id);
       window.setTimeout(() => setCopied(null), 1500);
+      setNotice("已复制到剪贴板；30 秒后自动清空（期间若复制了其他内容，不会误删）。");
+      scheduleClipboardClear(text);
     } catch (e) { setError(e instanceof Error ? e.message : "复制失败"); }
   };
 
@@ -218,6 +269,7 @@ export default function Vault({
             <div key={r.id} className="card" style={{ marginTop: 8, background: "#fbfcff" }}>
               <div className="mono">{r.ref}</div>
               <div className="dim">
+                {r.client ? `申请客户端：${r.client} · ` : ""}
                 {r.purpose ? `用途：${r.purpose} · ` : ""}
                 请求时间：{r.createdAt ? new Date(r.createdAt).toLocaleTimeString() : "—"} · 临时文件有效期 {r.ttlSec ?? 60} 秒
               </div>
@@ -256,6 +308,14 @@ export default function Vault({
       )}
       {hasMeta && unlocked && (
         <div className="row"><span className="badge">已解锁</span><button onClick={doLock}>锁定（清除内存密钥）</button></div>
+      )}
+      {hasMeta && (
+        <div className="row">
+          <label className="candidate" style={{ margin: 0 }}>
+            <input type="checkbox" checked={autoLock} onChange={(e) => changeAutoLock(e.target.checked)} />
+            <span>闲置 5 分钟自动锁定（默认开）</span>
+          </label>
+        </div>
       )}
 
       <ul className="list">

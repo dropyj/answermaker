@@ -1,15 +1,20 @@
 #!/usr/bin/env node
 // AnswerMaker MCP 服务端（Node 标准库实现，无第三方依赖）
 // MCP Streamable HTTP 最小可用子集：initialize / ping / tools/list / tools/call
-// 鉴权：Authorization: Bearer <Token>；Token 取环境变量 ANSWERMAKER_MCP_TOKEN，
-// 否则读取/生成 server/data/mcp-token.txt（首次生成后复用）。
+// 鉴权：Authorization: Bearer <Token>；支持多客户端 Token（server/data/tokens.json，
+// 每项 {id,name,token,createdAt,lastUsedAt,revoked}），环境变量 ANSWERMAKER_MCP_TOKEN
+// 与旧 mcp-token.txt 继续有效（视为名为 default 的客户端，首次启动时初始化进 tokens.json）。
+// 监听：默认只绑定 127.0.0.1；ANSWERMAKER_MCP_LAN=1 或 ANSWERMAKER_MCP_HOST 显式指定
+// 非本机地址时才监听局域网（PRD 能力保留，但默认关闭、显式开启）。
+// 审计：鉴权失败、工具调用与密钥取用流程 append-only 写 server/data/audit.log（JSONL），
+// 绝不记录 Token 值与任何密钥明文。
 // 调试：ANSWERMAKER_MCP_DEBUG=1 输出请求、工具参数与耗时。
 // 数据：server/data/knowledge.json（文档 + 文件归档）、vault-refs.json（仅引用与元数据）。
 // POPO：link_read / popo_spaces / popo_list 经 popo-cli（OpenID 登录）读取。
 
 import http from "node:http";
 import { randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync, readdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync, unlinkSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +23,8 @@ import { readLink, listTeamSpaces, listFolder, popoAvailable } from "./popo-lib.
 const here = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.ANSWERMAKER_DATA_DIR || join(here, "data");
 const TOKEN_FILE = process.env.ANSWERMAKER_MCP_TOKEN_FILE || join(DATA_DIR, "mcp-token.txt");
+const TOKENS_FILE = process.env.ANSWERMAKER_MCP_TOKENS_FILE || join(DATA_DIR, "tokens.json");
+const AUDIT_FILE = process.env.ANSWERMAKER_MCP_AUDIT_FILE || join(DATA_DIR, "audit.log");
 const RUNTIME_FILE = process.env.ANSWERMAKER_MCP_RUNTIME_FILE || join(DATA_DIR, "mcp-runtime.json");
 const SECRET_REQUEST_DIR = join(DATA_DIR, "secret-requests");
 const SECRET_RESPONSE_DIR = join(DATA_DIR, "secret-responses");
@@ -25,6 +32,11 @@ const SECRET_TEMP_DIR = join(tmpdir(), "answermaker-secrets");
 const basePortRaw = Number(process.env.ANSWERMAKER_MCP_PORT ?? 7361);
 const BASE_PORT = Number.isFinite(basePortRaw) ? basePortRaw : 7361;
 const DEBUG = /^(1|true)$/i.test(process.env.ANSWERMAKER_MCP_DEBUG || "");
+// 监听范围：默认仅本机；LAN=1 或 HOST 显式指定非本机地址时才开放局域网。
+const LAN_ENV = /^(1|true)$/i.test(process.env.ANSWERMAKER_MCP_LAN || "");
+const HOST_ENV = (process.env.ANSWERMAKER_MCP_HOST || "").trim();
+const BIND_HOST = HOST_ENV || (LAN_ENV ? "0.0.0.0" : "127.0.0.1");
+const IS_LAN = !["127.0.0.1", "localhost", "::1"].includes(BIND_HOST);
 const PROTOCOL_VERSION = "2024-11-05";
 const VERSION = "0.2.0";
 const MAX_BODY = 1_000_000;
@@ -74,12 +86,94 @@ function resolveToken() {
 const { token: TOKEN, source: TOKEN_SOURCE } = resolveToken();
 let actualPort = BASE_PORT;
 
+// ---------- 多客户端 Token 存储（server/data/tokens.json） ----------
+// 文件格式：[{id, name, token, createdAt, lastUsedAt, revoked}]。
+// Token 值只存在于该本地文件（已 gitignore），不写日志、不写审计。
+// 文件被 CLI/应用修改后按 mtime 热加载，新增/撤销无需重启服务。
+let tokenClients = [];
+let tokensMtime = -1;
+
+function saveTokens() {
+  try {
+    writeFileSync(TOKENS_FILE, JSON.stringify(tokenClients, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
+    try { tokensMtime = statSync(TOKENS_FILE).mtimeMs; } catch { /* ignore */ }
+  } catch (e) {
+    log("warn", "无法写入 tokens 文件", { message: e.message });
+  }
+}
+
+function loadTokensFromDisk() {
+  try {
+    const parsed = JSON.parse(readFileSync(TOKENS_FILE, "utf8"));
+    if (Array.isArray(parsed)) {
+      tokenClients = parsed.filter((c) => c && typeof c.token === "string" && typeof c.name === "string");
+      try { tokensMtime = statSync(TOKENS_FILE).mtimeMs; } catch { tokensMtime = -1; }
+      return true;
+    }
+  } catch { /* fall through */ }
+  return false;
+}
+
+function initTokens() {
+  if (loadTokensFromDisk()) {
+    // 应用轮换默认 Token 时只改 mcp-token.txt：与 tokens.json 中的 default 值不一致时
+    // 同步过来，保证旧轮换流程继续有效；被显式撤销的 default 不复活（值未变化不动）。
+    const def = tokenClients.find((c) => c.id === "default");
+    if (def && !def.revoked && TOKEN && def.token !== TOKEN) {
+      def.token = TOKEN;
+      saveTokens();
+    }
+    if (!def && TOKEN_SOURCE === "env" && TOKEN) {
+      tokenClients.unshift({ id: "default", name: "default", token: TOKEN, createdAt: Date.now(), lastUsedAt: 0, revoked: false });
+      saveTokens();
+    }
+    return;
+  }
+  tokenClients = [{ id: "default", name: "default", token: TOKEN, createdAt: Date.now(), lastUsedAt: 0, revoked: false }];
+  saveTokens();
+}
+
+function reloadTokensIfChanged() {
+  try {
+    const m = statSync(TOKENS_FILE).mtimeMs;
+    if (m !== tokensMtime) loadTokensFromDisk();
+  } catch { /* 文件不存在时保留内存副本 */ }
+}
+
+/** 返回命中的客户端记录（未撤销）；同时节流更新 lastUsedAt（60 秒内不重复落盘）。 */
+function authenticate(authHeader) {
+  if (typeof authHeader !== "string" || !authHeader.startsWith("Bearer ")) return null;
+  const presented = authHeader.slice("Bearer ".length);
+  if (!presented) return null;
+  reloadTokensIfChanged();
+  const client = tokenClients.find((c) => !c.revoked && c.token === presented);
+  if (!client) return null;
+  const now = Date.now();
+  if (now - (client.lastUsedAt || 0) > 60_000) {
+    client.lastUsedAt = now;
+    saveTokens();
+  }
+  return client;
+}
+
+// ---------- 审计（append-only JSONL，绝不记录 Token 值与密钥明文） ----------
+
+function audit(entry) {
+  try {
+    appendFileSync(AUDIT_FILE, JSON.stringify({ ts: new Date().toISOString(), ...entry }) + "\n", "utf8");
+  } catch { /* 审计失败不阻断主流程 */ }
+}
+
+initTokens();
+
 function writeRuntime(port) {
   try {
     writeFileSync(RUNTIME_FILE, JSON.stringify({
       name: "answermaker-mcp",
       version: VERSION,
       port,
+      bind: BIND_HOST,
+      lan: IS_LAN,
       pid: process.pid,
       startedAt: new Date(startedAt).toISOString(),
       tokenFile: TOKEN_FILE,
@@ -281,7 +375,7 @@ function secretResult(id, res, request) {
   return { status: res.status ?? "error", requestId: id, message: res.message ?? "" };
 }
 
-async function vaultGetSecret(args) {
+async function vaultGetSecret(args, client = "unknown") {
   ensureSecretDirs();
   sweepSecrets();
   const found = resolveVaultRef(args);
@@ -297,11 +391,13 @@ async function vaultGetSecret(args) {
     key: found.key ?? "",
     type: found.type ?? "",
     ref: found.ref ?? "",
+    client,
     purpose,
     ttlSec,
     createdAt: nowMs(),
   };
   writeJsonFile(join(SECRET_REQUEST_DIR, id + ".json"), request);
+  audit({ client, event: "secret_request", tool: "vault_get_secret", ref: request.ref, purpose, result: "pending" });
 
   const deadline = nowMs() + waitMs;
   while (nowMs() <= deadline) {
@@ -320,7 +416,7 @@ async function vaultGetSecret(args) {
   };
 }
 
-function vaultSecretStatus(args) {
+function vaultSecretStatus(args, client = "unknown") {
   const id = requireString(args, "requestId");
   if (!SECRET_ID_RE.test(id)) throw invalid("requestId 格式非法");
   ensureSecretDirs();
@@ -328,10 +424,13 @@ function vaultSecretStatus(args) {
   const res = readJsonFile(join(SECRET_RESPONSE_DIR, id + ".json"));
   if (res) {
     const request = readJsonFile(join(SECRET_REQUEST_DIR, id + ".json")) ?? {};
-    return secretResult(id, res, request);
+    const out = secretResult(id, res, request);
+    audit({ client, event: "secret_status", tool: "vault_secret_status", ref: out.ref ?? request.ref ?? "", result: out.status });
+    return out;
   }
   const request = readJsonFile(join(SECRET_REQUEST_DIR, id + ".json"));
   if (request) {
+    audit({ client, event: "secret_status", tool: "vault_secret_status", ref: request.ref ?? "", result: "pending" });
     return {
       status: "pending",
       requestId: id,
@@ -343,10 +442,11 @@ function vaultSecretStatus(args) {
       message: "等待用户在 AnswerMaker 中授权",
     };
   }
+  audit({ client, event: "secret_status", tool: "vault_secret_status", result: "unknown" });
   return { status: "unknown", requestId: id, message: "请求不存在或已过期" };
 }
 
-function vaultSecretRelease(args) {
+function vaultSecretRelease(args, client = "unknown") {
   const id = requireString(args, "requestId");
   if (!SECRET_ID_RE.test(id)) throw invalid("requestId 格式非法");
   ensureSecretDirs();
@@ -358,6 +458,7 @@ function vaultSecretRelease(args) {
   for (const p of [join(SECRET_RESPONSE_DIR, id + ".json"), join(SECRET_REQUEST_DIR, id + ".json")]) {
     try { unlinkSync(p); } catch { /* ignore */ }
   }
+  audit({ client, event: "secret_release", tool: "vault_secret_release", result: "ok" });
   return { status: "released", requestId: id, removedFile };
 }
 
@@ -387,6 +488,8 @@ function serverStatus() {
     version: VERSION,
     protocolVersion: PROTOCOL_VERSION,
     port: actualPort,
+    bind: BIND_HOST,
+    lan: IS_LAN,
     pid: process.pid,
     uptimeSec: Math.round((Date.now() - startedAt) / 1000),
     node: process.version,
@@ -494,13 +597,13 @@ const TOOLS = [
   },
 ];
 
-async function callTool(name, args = {}) {
+async function callTool(name, args = {}, client = "unknown") {
   if (typeof name !== "string" || !name) throw invalid("缺少工具名");
   if (args === null || typeof args !== "object" || Array.isArray(args)) throw invalid("arguments 必须是对象");
 
   switch (name) {
     case "server_info":
-      return { name: "answermaker", version: VERSION, protocolVersion: PROTOCOL_VERSION, port: actualPort, tools: TOOLS.map((t) => t.name) };
+      return { name: "answermaker", version: VERSION, protocolVersion: PROTOCOL_VERSION, port: actualPort, bind: BIND_HOST, lan: IS_LAN, tools: TOOLS.map((t) => t.name) };
     case "server_status":
       return serverStatus();
     case "vault_list_refs":
@@ -510,11 +613,11 @@ async function callTool(name, args = {}) {
       return { query, hits: vaultSearch(query, clampLimit(args.limit)) };
     }
     case "vault_get_secret":
-      return await vaultGetSecret(args);
+      return await vaultGetSecret(args, client);
     case "vault_secret_status":
-      return vaultSecretStatus(args);
+      return vaultSecretStatus(args, client);
     case "vault_secret_release":
-      return vaultSecretRelease(args);
+      return vaultSecretRelease(args, client);
     case "knowledge_search": {
       const query = requireString(args, "query");
       return { query, hits: knowledgeSearch(query, clampLimit(args.limit)) };
@@ -570,7 +673,7 @@ async function callTool(name, args = {}) {
   }
 }
 
-async function handleRpc(msg) {
+async function handleRpc(msg, client = "unknown") {
   if (!msg || typeof msg !== "object" || Array.isArray(msg)) {
     return { jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } };
   }
@@ -606,11 +709,16 @@ async function handleRpc(msg) {
       if (DEBUG) log("debug", "tool_args", { tool, args: safeJson(args).slice(0, 800) });
       const t0 = Date.now();
       try {
-        const out = await callTool(tool, args);
+        const out = await callTool(tool, args, client);
         log("info", "tool_call", { tool, ok: true, ms: Date.now() - t0 });
+        // 密钥三件套有各自的 secret_* 审计事件，这里只记普通工具调用，避免重复。
+        if (!["vault_get_secret", "vault_secret_status", "vault_secret_release"].includes(tool)) {
+          audit({ client, event: "tool_call", tool, result: "ok" });
+        }
         return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(out, null, 2) }] } };
       } catch (e) {
         log("error", "tool_call", { tool, ok: false, ms: Date.now() - t0, error: e.message });
+        audit({ client, event: "tool_call", tool, result: "error" });
         return { jsonrpc: "2.0", id, error: { code: e.code ?? -32603, message: e.message } };
       }
     }
@@ -619,31 +727,44 @@ async function handleRpc(msg) {
   }
 }
 
-async function handlePayload(payload) {
+async function handlePayload(payload, client = "unknown") {
   if (Array.isArray(payload)) {
     if (payload.length === 0) {
       return { jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } };
     }
-    const results = (await Promise.all(payload.map(handleRpc))).filter(Boolean);
+    const results = (await Promise.all(payload.map((m) => handleRpc(m, client)))).filter(Boolean);
     return results.length ? results : null;
   }
-  return handleRpc(payload);
+  return handleRpc(payload, client);
 }
 
-function corsHeaders() {
-  return {
-    "Access-Control-Allow-Origin": "*",
+const LOCAL_ORIGIN_RE = /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/;
+
+function corsHeaders(req) {
+  const headers = {
     "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
     "Access-Control-Allow-Headers": "Authorization, Content-Type, Mcp-Session-Id",
     "Access-Control-Max-Age": "86400",
   };
+  const origin = req?.headers?.origin;
+  if (IS_LAN) {
+    // 局域网模式保留通配；风险已在启动日志与应用面板标注，靠多 Token + 审计约束。
+    headers["Access-Control-Allow-Origin"] = "*";
+  } else if (origin && LOCAL_ORIGIN_RE.test(origin)) {
+    headers["Access-Control-Allow-Origin"] = origin;
+  } else if (!origin) {
+    // 无 Origin 的本地客户端（curl/桌面应用）不受 CORS 约束；回一个本机来源即可。
+    headers["Access-Control-Allow-Origin"] = "http://127.0.0.1";
+  }
+  // 本机模式下非本机网页来源不下发 ACAO，浏览器会拦截其读取响应。
+  return headers;
 }
 
-function sendJson(res, status, obj) {
+function sendJson(res, status, obj, req) {
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
-    ...corsHeaders(),
+    ...corsHeaders(req),
   });
   res.end(JSON.stringify(obj));
 }
@@ -652,7 +773,7 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
 
   if (url.pathname === "/mcp" && req.method === "OPTIONS") {
-    res.writeHead(204, corsHeaders());
+    res.writeHead(204, corsHeaders(req));
     res.end();
     return;
   }
@@ -663,20 +784,23 @@ const server = http.createServer((req, res) => {
       name: "answermaker-mcp",
       version: VERSION,
       port: actualPort,
+      bind: BIND_HOST,
+      lan: IS_LAN,
       pid: process.pid,
       uptimeSec: Math.round((Date.now() - startedAt) / 1000),
-    });
+    }, req);
   }
 
-  if (url.pathname !== "/mcp") return sendJson(res, 404, { error: "not_found" });
+  if (url.pathname !== "/mcp") return sendJson(res, 404, { error: "not_found" }, req);
   if (req.method !== "POST") {
-    return sendJson(res, 405, { error: "method_not_allowed", message: "Streamable HTTP endpoint accepts POST" });
+    return sendJson(res, 405, { error: "method_not_allowed", message: "Streamable HTTP endpoint accepts POST" }, req);
   }
 
-  const auth = req.headers.authorization ?? "";
-  if (auth !== `Bearer ${TOKEN}`) {
+  const client = authenticate(req.headers.authorization);
+  if (!client) {
     log("warn", "unauthorized", { ip: req.socket.remoteAddress });
-    return sendJson(res, 401, { error: "unauthorized", message: "Missing or invalid API token" });
+    audit({ client: "unknown", event: "auth_fail", result: "unauthorized" });
+    return sendJson(res, 401, { error: "unauthorized", message: "Missing or invalid API token" }, req);
   }
 
   let body = "";
@@ -686,7 +810,7 @@ const server = http.createServer((req, res) => {
     body += chunk;
     if (body.length > MAX_BODY) {
       tooLarge = true;
-      sendJson(res, 413, { jsonrpc: "2.0", id: null, error: { code: -32600, message: "Request body too large" } });
+      sendJson(res, 413, { jsonrpc: "2.0", id: null, error: { code: -32600, message: "Request body too large" } }, req);
       req.destroy();
     }
   });
@@ -696,7 +820,7 @@ const server = http.createServer((req, res) => {
     try {
       payload = JSON.parse(body);
     } catch {
-      return sendJson(res, 400, { jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } });
+      return sendJson(res, 400, { jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } }, req);
     }
     const t0 = Date.now();
     const isBatch = Array.isArray(payload);
@@ -704,17 +828,17 @@ const server = http.createServer((req, res) => {
     const id = isBatch ? undefined : payload?.id;
     log("debug", "request", { method, id });
     try {
-      const reply = await handlePayload(payload);
+      const reply = await handlePayload(payload, client.name);
       log("debug", "response", { method, id, ms: Date.now() - t0 });
       if (reply === null) {
-        res.writeHead(202, corsHeaders());
+        res.writeHead(202, corsHeaders(req));
         res.end();
         return;
       }
-      sendJson(res, 200, reply);
+      sendJson(res, 200, reply, req);
     } catch (e) {
       log("error", "request_failed", { method, id, error: e.message });
-      sendJson(res, 500, { jsonrpc: "2.0", id: id ?? null, error: { code: -32603, message: e.message } });
+      sendJson(res, 500, { jsonrpc: "2.0", id: id ?? null, error: { code: -32603, message: e.message } }, req);
     }
   });
 });
@@ -728,14 +852,14 @@ function listenWithFallback(base) {
         attempts++;
         current++;
         log("warn", "port in use, retrying", { port: current });
-        server.listen(current);
+        server.listen(current, BIND_HOST);
       } else {
         server.off("error", onError);
         reject(err);
       }
     };
     server.on("error", onError);
-    server.listen(current, () => {
+    server.listen(current, BIND_HOST, () => {
       server.off("error", onError);
       const addr = server.address();
       resolve(typeof addr === "object" && addr ? addr.port : current);
@@ -760,8 +884,13 @@ process.on("unhandledRejection", (e) => log("error", "unhandledRejection", { mes
 actualPort = await listenWithFallback(BASE_PORT);
 writeRuntime(actualPort);
 
-console.log(`AnswerMaker MCP server listening on http://0.0.0.0:${actualPort}/mcp`);
-console.log(`API Token: ${TOKEN.slice(0, 6)}… (${TOKEN_SOURCE}) — full value in token file below`);
-console.log(`Token file: ${TOKEN_FILE}`);
+console.log(`AnswerMaker MCP server listening on http://${BIND_HOST}:${actualPort}/mcp`);
+if (IS_LAN) {
+  console.log("⚠ 局域网模式已开启：服务监听非本机地址，局域网内持有任一有效 Token 的客户端均可访问；请确认网络可信，并留意审计日志 server/data/audit.log。");
+} else {
+  console.log("监听范围：仅本机（127.0.0.1）。如需局域网访问，设置 ANSWERMAKER_MCP_LAN=1 后重启。");
+}
+console.log(`API Token (default): ${TOKEN.slice(0, 6)}… (${TOKEN_SOURCE}) — full value in token file below`);
+console.log(`Token file: ${TOKEN_FILE} · Clients file: ${TOKENS_FILE} (${tokenClients.length} clients)`);
 console.log(`Health: http://localhost:${actualPort}/health`);
 if (DEBUG) console.log("Debug logging enabled (ANSWERMAKER_MCP_DEBUG=1)");
