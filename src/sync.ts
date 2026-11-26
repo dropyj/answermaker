@@ -40,6 +40,8 @@ export interface SyncSettings {
   lastPushMsg: string; // 服务器通道：上次推送结果（版本/大小）
   lastPullAt: number; // 服务器通道：上次拉取时间
   lastPullMsg: string; // 服务器通道：上次拉取结果（来源设备/合并摘要）
+  autoSync: boolean; // 服务器通道：自动同步开关（项6，默认关；开启且本会话已输入同步口令时，数据变更后防抖静默推送）
+  lastSyncSig: string; // 服务器通道：上次成功同步（推送/拉取合并后）时的数据签名，用于冲突检测
 }
 
 export interface DeviceIdentity { id: string; name: string }
@@ -67,7 +69,7 @@ export function setDeviceName(name: string) {
 }
 
 export function loadSyncSettings(): SyncSettings {
-  const def: SyncSettings = { channel: "folder", folderPath: "", serverEndpoint: DEFAULT_SYNC_ENDPOINT, serverToken: "", accountEmail: "", sessionToken: "", sessionExpiresAt: 0, verifier: null, lastSyncAt: 0, lastSyncFrom: "", lastPushAt: 0, lastPushMsg: "", lastPullAt: 0, lastPullMsg: "" };
+  const def: SyncSettings = { channel: "folder", folderPath: "", serverEndpoint: DEFAULT_SYNC_ENDPOINT, serverToken: "", accountEmail: "", sessionToken: "", sessionExpiresAt: 0, verifier: null, lastSyncAt: 0, lastSyncFrom: "", lastPushAt: 0, lastPushMsg: "", lastPullAt: 0, lastPullMsg: "", autoSync: false, lastSyncSig: "" };
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
     const s = raw ? { ...def, ...(JSON.parse(raw) as Partial<SyncSettings>) } : def;

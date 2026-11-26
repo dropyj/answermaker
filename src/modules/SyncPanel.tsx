@@ -9,6 +9,19 @@ import {
   type InviteInfo, type ServerPackageInfo, type ServerSessionInfo, type SyncChannel, type SyncPayload, type SyncSettings,
 } from "../sync";
 
+/** 数据签名（项6）：同步负载七类数据的长度 + 内容哈希；与上次同步签名不一致即视为本地有未同步变更。 */
+function dataSignature(d: SyncData): string {
+  const parts = [d.projects, d.systems, d.notes, d.todos, d.events, d.accounts, d.links];
+  let h = 5381;
+  let len = 0;
+  for (const p of parts) {
+    const s = JSON.stringify(p);
+    len += s.length;
+    for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  }
+  return `${len}:${(h >>> 0).toString(36)}`;
+}
+
 export interface SyncData {
   projects: Project[];
   links: ProjectLink[];
@@ -88,6 +101,84 @@ export default function SyncPanel({ data, onMerge }: {
   }, [loggedIn, settings.sessionToken]);
   // 推送/拉取/版本列表可用条件：已登录，或填了高级兼容的手动设备 Token
   const serverUsable = loggedIn || settings.serverToken.trim() !== "";
+
+  // 自动同步 + 冲突提示（项6）
+  const [autoMsg, setAutoMsg] = useState("");
+  const [remoteNotice, setRemoteNotice] = useState<null | { kind: "pull" | "conflict"; version: number; updatedAt: string; deviceName: string; localChangeAt: number }>(null);
+  const sig = dataSignature(data);
+  const sigRef = useRef(sig);
+  sigRef.current = sig;
+  const adoptSigRef = useRef(false); // 拉取合并后，把合并结果的签名采纳为已同步基线
+  const pushCoreRef = useRef<(p: string) => Promise<{ result: string; vaultCount: number | null }>>(async () => { throw new Error("推送核心未就绪"); });
+  const conflictCheckedRef = useRef(false);
+  const passCheckedRef = useRef<{ pass: string; ok: boolean } | null>(null);
+  const [localChangeAt, setLocalChangeAt] = useState(0);
+
+  // 本地变更时间记录（签名偏离上次同步基线时）
+  useEffect(() => {
+    if (settings.lastSyncSig && sig !== settings.lastSyncSig) setLocalChangeAt((t) => t || Date.now());
+    if (sig === settings.lastSyncSig) setLocalChangeAt(0);
+  }, [sig, settings.lastSyncSig]);
+
+  // 拉取合并完成后采纳新基线签名（合并引起的数据变化不算「本地未同步变更」）
+  useEffect(() => {
+    if (adoptSigRef.current && sig !== settings.lastSyncSig) {
+      adoptSigRef.current = false;
+      const next = { ...loadSyncSettings(), lastSyncSig: sig };
+      saveSyncSettings(next);
+      setSettings(next);
+    }
+  }, [sig, settings.lastSyncSig]);
+
+  // 挂载且已登录时查一次服务器最新版本：较新则提示可拉取 / 冲突
+  useEffect(() => {
+    if (conflictCheckedRef.current) return;
+    if (settings.channel !== "server" || !serverUsable) return;
+    conflictCheckedRef.current = true;
+    (async () => {
+      try {
+        const pkgs = await listServerPackages();
+        const latest = pkgs[0];
+        if (!latest) return;
+        const cur = loadSyncSettings();
+        const serverNewer = Date.parse(latest.updatedAt) > (cur.lastSyncAt || 0);
+        if (!serverNewer) return;
+        const localChanged = cur.lastSyncAt > 0 && cur.lastSyncSig !== "" && sigRef.current !== cur.lastSyncSig;
+        setRemoteNotice({ kind: localChanged ? "conflict" : "pull", version: latest.version, updatedAt: latest.updatedAt, deviceName: latest.deviceName, localChangeAt: Date.now() });
+      } catch { /* 冲突检查失败不打扰：手动刷新版本列表仍可用 */ }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings.channel, serverUsable]);
+
+  // 自动同步：开启 + 已登录 + 本会话口令已验证 + 签名变化 → 防抖 15 秒静默推送
+  useEffect(() => {
+    if (!settings.autoSync || settings.channel !== "server" || !serverUsable || !settings.verifier || !pass) return;
+    if (sig === loadSyncSettings().lastSyncSig) return;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          if (passCheckedRef.current?.pass !== pass) {
+            passCheckedRef.current = { pass, ok: await checkSyncPassphrase(pass) };
+          }
+          if (!passCheckedRef.current.ok || cancelled) return;
+          const { result } = await pushCoreRef.current(pass);
+          if (cancelled) return;
+          const now = new Date();
+          const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+          save({ ...loadSyncSettings(), lastSyncAt: Date.now(), lastSyncFrom: device.name, lastPushAt: Date.now(), lastPushMsg: result, lastSyncSig: sigRef.current });
+          setSettings(loadSyncSettings());
+          setRemoteNotice(null);
+          setAutoMsg(`自动同步于 ${hhmm}（${result}）`);
+        } catch (e) {
+          if (!cancelled) setAutoMsg(`自动同步失败：${e instanceof Error ? e.message : String(e)}（不影响手动推送）`);
+        }
+      })();
+    }, 15000);
+    return () => { cancelled = true; clearTimeout(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sig, settings.autoSync, settings.channel, serverUsable, settings.verifier, pass]);
+
 
   const save = (next: SyncSettings) => { setSettings(next); saveSyncSettings(next); };
 
@@ -248,19 +339,26 @@ export default function SyncPanel({ data, onMerge }: {
     catch { setError("复制失败，请手动选中邀请码复制"); }
   };
 
+  /** 推送核心（项6 抽出，手动/自动共用）：构建负载 → 加密 → PUT（内部断言密文格式）。 */
+  const pushCore = async (passphrase: string): Promise<{ result: string; vaultCount: number | null }> => {
+    const payload = await buildPayload();
+    const text = await buildSyncPackage(payload, passphrase);
+    const r = await pushToServer(text); // 内部断言密文格式，绝不上传明文
+    return { result: `版本 v${r.version} · ${r.size} 字节 · 服务器时间 ${new Date(r.updatedAt).toLocaleString()}`, vaultCount: payload.vault ? payload.vault.length : null };
+  };
+  pushCoreRef.current = pushCore;
+
   const doPush = async () => {
     setError(""); setMsg("");
     if (!settings.verifier) { setError("请先设置同步口令"); return; }
     if (!(await checkSyncPassphrase(pass))) { setError("同步口令不正确（在上方输入框输入当前口令后再推送）"); return; }
     setServerBusy("push");
     try {
-      const payload = await buildPayload();
-      const text = await buildSyncPackage(payload, pass);
-      const r = await pushToServer(text); // 内部断言密文格式，绝不上传明文
-      const result = `版本 v${r.version} · ${r.size} 字节 · 服务器时间 ${new Date(r.updatedAt).toLocaleString()}`;
-      save({ ...loadSyncSettings(), lastSyncAt: Date.now(), lastSyncFrom: device.name, lastPushAt: Date.now(), lastPushMsg: result });
+      const { result, vaultCount } = await pushCore(pass);
+      save({ ...loadSyncSettings(), lastSyncAt: Date.now(), lastSyncFrom: device.name, lastPushAt: Date.now(), lastPushMsg: result, lastSyncSig: sigRef.current });
       setSettings(loadSyncSettings());
-      setMsg(`已推送加密同步包到服务器：${result}（保险库${payload.vault ? `含 ${payload.vault.length} 条条目` : "未解锁，本次未包含"}）。服务器只保存密文。`);
+      setRemoteNotice(null);
+      setMsg(`已推送加密同步包到服务器：${result}（保险库${vaultCount !== null ? `含 ${vaultCount} 条条目` : "未解锁，本次未包含"}）。服务器只保存密文。`);
     } catch (e) { setSettings(loadSyncSettings()); setError(e instanceof Error ? e.message : "推送失败"); }
     finally { setServerBusy(""); }
   };
@@ -272,8 +370,10 @@ export default function SyncPanel({ data, onMerge }: {
     try {
       const payload = await pullFromServer(importPass);
       const summary = await onMerge(payload);
+      adoptSigRef.current = true; // 合并后的数据签名由采纳 effect 写为新基线
       save({ ...loadSyncSettings(), lastSyncAt: Date.now(), lastSyncFrom: payload.deviceName, lastPullAt: Date.now(), lastPullMsg: `来源「${payload.deviceName}」：${summary}` });
       setSettings(loadSyncSettings());
+      setRemoteNotice(null);
       setMsg(`已从服务器拉取并合并（来源设备「${payload.deviceName}」）：${summary}`);
     } catch (e) { setSettings(loadSyncSettings()); setError(e instanceof Error ? e.message : "拉取失败"); }
     finally { setServerBusy(""); }
@@ -427,6 +527,29 @@ export default function SyncPanel({ data, onMerge }: {
 
       {settings.channel === "server" && (
         <div style={{ marginTop: 10 }}>
+          {remoteNotice && (
+            <div className="warnbox">
+              {remoteNotice.kind === "pull" ? (
+                <>服务器有新版本 v{remoteNotice.version}（设备「{remoteNotice.deviceName}」，{new Date(remoteNotice.updatedAt).toLocaleString()}），本地自上次同步后没有变更，可直接拉取合并。</>
+              ) : (
+                <>同步冲突：服务器有新版本 v{remoteNotice.version}（设备「{remoteNotice.deviceName}」，{new Date(remoteNotice.updatedAt).toLocaleString()}），本地在上次同步后也有变更{localChangeAt ? `（约 ${new Date(localChangeAt).toLocaleString()}）` : ""}。请选择拉取合并（保留双方数据按合并规则处理）或推送本地覆盖服务器最新版。</>
+              )}
+              <div className="row">
+                <button disabled={serverBusy !== ""} onClick={() => void doPull()}>拉取并合并</button>
+                {remoteNotice.kind === "conflict" && (
+                  <button disabled={serverBusy !== ""} onClick={() => void doPush()}>推送本地版本</button>
+                )}
+                <button disabled={serverBusy !== ""} onClick={() => setRemoteNotice(null)}>忽略</button>
+              </div>
+            </div>
+          )}
+          <div className="row">
+            <label>
+              <input type="checkbox" checked={settings.autoSync} onChange={(e) => save({ ...settings, autoSync: e.target.checked })} /> 自动同步（实验）
+            </label>
+            <span className="dim">开启后，在本页输入同步口令且数据有变更时，停顿 15 秒自动静默推送；失败只更新下方状态行，不弹窗。默认关。</span>
+          </div>
+          {autoMsg && <p className="dim">{autoMsg}</p>}
           <div className="row">
             <button disabled={settings.serverEndpoint.trim() === "" || serverBusy !== ""} onClick={() => void doServerTest()}>
               {serverBusy === "health" ? "测试中…" : "连接测试"}
