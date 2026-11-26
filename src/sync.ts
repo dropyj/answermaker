@@ -13,19 +13,26 @@ import { uid } from "./types";
  * 同步通道三类：
  *  1. folder     本地文件夹 —— Tauri 经 Rust 读写；浏览器降级为手动导出/导入文件；
  *  2. sync-drive 同步盘/Git 文件夹 —— 与 folder 同一机制，把文件夹选在网盘/Git 仓库目录即可（通道只见密文）；
- *  3. server     自托管服务器端点 —— 已实现（见文件末尾）：PUT/GET .amsync 密文包 + 设备 Token 鉴权，
- *                服务器只存密文包与版本元信息，仍是零知识。当前契约走 HTTP 明文：链路上只有密文包，
- *                但设备 Token 明文可见，HTTPS 需域名/证书，列为待办（见 README）。
+ *  3. server     自托管服务器端点 —— 已实现（见文件末尾）：PUT/GET .amsync 密文包，默认端点
+ *                https://heytiger.cn/amsync（HTTPS）自动预填、可改自建端点；主路径为账号登录
+ *                （邮箱+密码 → 会话 Token，服务器按账号隔离存储），手动设备 Token 为高级兼容项。
+ *                服务器只存密文包与版本元信息，仍是零知识。
  * 口令丢失无法恢复：口令不落盘，只存一个校验块用于本地验证输对没有。
  */
 
 export type SyncChannel = "folder" | "sync-drive" | "server";
 
+/** 服务器通道默认端点（官方自托管服务，HTTPS）：未配置/端点为空时自动预填，用户可改成自建端点。 */
+export const DEFAULT_SYNC_ENDPOINT = "https://heytiger.cn/amsync";
+
 export interface SyncSettings {
   channel: SyncChannel;
   folderPath: string;
-  serverEndpoint: string; // 服务器通道：端点 Base URL（如 http://111.230.147.240:7362），仅存本地
-  serverToken: string; // 服务器通道：设备 Token（Bearer），仅存本地 localStorage，不进同步包
+  serverEndpoint: string; // 服务器通道：端点 Base URL（默认 DEFAULT_SYNC_ENDPOINT），仅存本地
+  serverToken: string; // 服务器通道：手动设备 Token（高级兼容项，Bearer），仅存本地 localStorage，不进同步包
+  accountEmail: string; // 服务器通道：已登录账号邮箱（仅邮箱，非秘密；登录态以 sessionToken 为准）
+  sessionToken: string; // 服务器通道：账号登录会话 Token（Bearer），仅存本地 localStorage，不进同步包
+  sessionExpiresAt: number; // 服务器通道：会话到期时间（epoch ms，0 表示未知）
   verifier: { salt: string; blob: { iv: string; ct: string } } | null; // 同步口令校验块
   lastSyncAt: number;
   lastSyncFrom: string;
@@ -60,10 +67,13 @@ export function setDeviceName(name: string) {
 }
 
 export function loadSyncSettings(): SyncSettings {
-  const def: SyncSettings = { channel: "folder", folderPath: "", serverEndpoint: "", serverToken: "", verifier: null, lastSyncAt: 0, lastSyncFrom: "", lastPushAt: 0, lastPushMsg: "", lastPullAt: 0, lastPullMsg: "" };
+  const def: SyncSettings = { channel: "folder", folderPath: "", serverEndpoint: DEFAULT_SYNC_ENDPOINT, serverToken: "", accountEmail: "", sessionToken: "", sessionExpiresAt: 0, verifier: null, lastSyncAt: 0, lastSyncFrom: "", lastPushAt: 0, lastPushMsg: "", lastPullAt: 0, lastPullMsg: "" };
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
-    return raw ? { ...def, ...(JSON.parse(raw) as Partial<SyncSettings>) } : def;
+    const s = raw ? { ...def, ...(JSON.parse(raw) as Partial<SyncSettings>) } : def;
+    // 端点为空（新用户/旧配置未填）时回填默认端点；非空的自定义端点不覆盖
+    if (!s.serverEndpoint || !s.serverEndpoint.trim()) s.serverEndpoint = DEFAULT_SYNC_ENDPOINT;
+    return s;
   } catch { return def; }
 }
 export function saveSyncSettings(s: SyncSettings) {
@@ -188,15 +198,24 @@ export function mergeById<T extends { id: string; updatedAt?: number; createdAt?
 
 /* ================= 服务器端点通道（已实现） =================
  * 契约（与服务端 answermaker-sync 对齐，不要改契约）：
- *  Base URL = 设置里的 serverEndpoint；除 /health 外所有请求带 Authorization: Bearer <serverToken>。
+ *  Base URL = 设置里的 serverEndpoint（默认 https://heytiger.cn/amsync，已含 /amsync 前缀语义，
+ *  以下路径均相对该基址拼接）；除 /health 与 /auth/login、/auth/register 外，所有请求带
+ *  Authorization: Bearer <会话 Token>（账号登录主路径；无会话时回退高级兼容的手动设备 Token）。
+ *  POST   /auth/register    {email, password, inviteCode?} → 200 {token, user:{id,email}, expiresAt}
+ *                           错误：409 email_exists、400 weak_password/invalid_email、
+ *                           403 invite_required/invite_invalid（已有账号后再注册需邀请码）
+ *  POST   /auth/login       {email, password} → 200 同上；401 invalid_credentials；429 too_many_attempts
+ *  POST   /auth/logout      （Bearer）→ 200 {ok:true}
+ *  GET    /auth/me          （Bearer）→ 200 {user:{id,email}}；401 未登录/过期
  *  PUT    /package          body 为 .amsync 原文，头 X-Device-Id / X-Device-Name
  *                           → 200 {ok, version, size, updatedAt}；413 表示包超过 20MB 上限
  *  GET    /package/latest   → 200 包原文（头 X-Package-Version / X-Package-Updated-At / X-Package-Device）
  *                           无包时 404 {error:'no_package'}
- *  GET    /packages         → 200 {packages:[{version, deviceName, size, updatedAt}]}（降序，最多 10）
+ *  GET    /packages         → 200 {packages:[{version, deviceName, size, updatedAt}]}（降序，最多 10，按账号隔离）
  *  GET    /health           → 200 {ok:true, service:'answermaker-sync', version:'1.0.0'}，无需鉴权
- *  401 {error:'unauthorized'} 表示设备 Token 无效。
+ *  会话 401 时客户端清掉本地 sessionToken 并提示「登录已过期，请重新登录」。
  * 只传密文：pushToServer 推送前先 assertEncryptedPackage 断言包体是加密格式，含明文字段直接拒绝。
+ * 密码只在登录/注册请求里出现，不落盘；落盘的只有会话 Token（本地 localStorage，不进同步包）。
  * 请求走普通浏览器 fetch（Tauri webview 同路径）；服务端回 CORS * 并处理 OPTIONS 预检。
  */
 
@@ -204,35 +223,50 @@ export interface ServerHealth { ok: boolean; service: string; version: string }
 export interface ServerPackageInfo { version: number; deviceName: string; size: number; updatedAt: string }
 export interface ServerPushResult { version: number; size: number; updatedAt: string }
 
-/** 服务器通道错误：status 为 HTTP 状态码，0 表示网络层失败（未收到响应）。UI 据此区分提示。 */
+/** 服务器通道错误：status 为 HTTP 状态码，0 表示网络层失败（未收到响应）；code 为服务端 error 代码（如 invite_required）。UI 据此区分提示。 */
 export class SyncServerError extends Error {
   status: number;
-  constructor(message: string, status = 0) { super(message); this.status = status; }
+  code?: string;
+  constructor(message: string, status = 0, code?: string) { super(message); this.status = status; this.code = code; }
 }
 
 function serverBase(): string {
   return loadSyncSettings().serverEndpoint.trim().replace(/\/+$/, "");
 }
 
-function serverConfig(): { base: string; token: string } {
+/** 当前生效的鉴权 Token：优先账号登录会话 Token，其次高级兼容的手动设备 Token。 */
+function activeToken(): { token: string; kind: "session" | "device" } | null {
+  const s = loadSyncSettings();
+  if (s.sessionToken.trim()) return { token: s.sessionToken.trim(), kind: "session" };
+  if (s.serverToken.trim()) return { token: s.serverToken.trim(), kind: "device" };
+  return null;
+}
+
+function serverConfig(): { base: string; token: string; kind: "session" | "device" } {
   const s = loadSyncSettings();
   const base = s.serverEndpoint.trim().replace(/\/+$/, "");
   if (!base) throw new SyncServerError("未填写服务器端点 URL，请先在同步设置里填写");
-  const token = s.serverToken.trim();
-  if (!token) throw new SyncServerError("未填写设备 Token，请先在同步设置里填写");
-  return { base, token };
+  const active = activeToken();
+  if (!active) throw new SyncServerError("尚未登录服务器账号，也未填写手动 Token：请先在同步设置里登录账号（或在高级项里填写设备 Token）");
+  return { base, ...active };
 }
 
-async function readServerError(res: Response): Promise<string> {
+/** 清掉本地登录态（会话过期/退出登录时用；保留 accountEmail 方便下次登录预填）。 */
+function clearSession() {
+  const s = loadSyncSettings();
+  saveSyncSettings({ ...s, sessionToken: "", sessionExpiresAt: 0 });
+}
+
+async function readServerError(res: Response): Promise<{ message: string; code?: string }> {
   try {
     const j = (await res.json()) as { error?: unknown };
-    if (typeof j?.error === "string" && j.error) return j.error;
+    if (typeof j?.error === "string" && j.error) return { message: j.error, code: j.error };
   } catch { /* 非 JSON 错误体，落到状态码 */ }
-  return `HTTP ${res.status}`;
+  return { message: `HTTP ${res.status}` };
 }
 
 async function serverFetch(path: string, init: RequestInit = {}): Promise<Response> {
-  const { base, token } = serverConfig();
+  const { base, token, kind } = serverConfig();
   const dev = getDevice();
   let res: Response;
   try {
@@ -250,7 +284,13 @@ async function serverFetch(path: string, init: RequestInit = {}): Promise<Respon
   } catch {
     throw new SyncServerError("无法连接同步服务器：网络不通、端点地址错误或服务未启动", 0);
   }
-  if (res.status === 401) throw new SyncServerError("服务器拒绝访问：设备 Token 无效（401），请核对同步设置里的设备 Token", 401);
+  if (res.status === 401) {
+    if (kind === "session") {
+      clearSession();
+      throw new SyncServerError("登录已过期，请重新登录", 401, "session_expired");
+    }
+    throw new SyncServerError("服务器拒绝访问：设备 Token 无效（401），请核对同步设置里的设备 Token", 401);
+  }
   if (res.status === 413) throw new SyncServerError("同步包超过服务器上限（20MB），推送被拒（413）", 413);
   return res;
 }
@@ -262,12 +302,97 @@ export async function checkServerHealth(): Promise<ServerHealth> {
   let res: Response;
   try { res = await fetch(`${base}/health`); }
   catch { throw new SyncServerError("无法连接同步服务器：网络不通、端点地址错误或服务未启动", 0); }
-  if (!res.ok) throw new SyncServerError(`健康检查失败：${await readServerError(res)}`, res.status);
+  if (!res.ok) throw new SyncServerError(`健康检查失败：${(await readServerError(res)).message}`, res.status);
   const j = (await res.json()) as ServerHealth;
   if (!j || j.ok !== true || j.service !== "answermaker-sync") {
     throw new SyncServerError("端点有响应，但不是 AnswerMaker 同步服务（/health 校验不通过）");
   }
   return j;
+}
+
+/* ================= 账号登录（服务器通道主路径） =================
+ * 密码只出现在登录/注册请求体里，绝不落盘；成功后只把会话 Token 与账号邮箱存本地设置。
+ */
+
+export interface SyncAccountUser { id: string; email: string }
+export interface AuthSession { token: string; user: SyncAccountUser; expiresAt: string }
+
+const AUTH_ERROR_TEXT: Record<string, string> = {
+  email_exists: "该邮箱已注册，请直接登录",
+  weak_password: "密码强度不足：请换一个更长的密码（建议至少 8 位，含字母与数字）",
+  invalid_email: "邮箱格式不正确",
+  invite_required: "当前服务器注册需要邀请码，请输入邀请码后再注册",
+  invite_invalid: "邀请码无效，请核对后重试",
+  invalid_credentials: "邮箱或密码不正确",
+  too_many_attempts: "登录尝试次数过多，请稍后再试",
+  unauthorized: "登录已过期，请重新登录",
+};
+
+async function authRequest(path: "/auth/login" | "/auth/register", body: Record<string, unknown>): Promise<AuthSession> {
+  const base = serverBase();
+  if (!base) throw new SyncServerError("未填写服务器端点 URL，请先在同步设置里填写");
+  let res: Response;
+  try {
+    res = await fetch(`${base}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    throw new SyncServerError("无法连接同步服务器：网络不通、端点地址错误或服务未启动", 0);
+  }
+  if (!res.ok) {
+    const { code } = await readServerError(res);
+    const text = (code && AUTH_ERROR_TEXT[code]) || `服务器返回错误（HTTP ${res.status}${code ? `：${code}` : ""}）`;
+    throw new SyncServerError(text, res.status, code);
+  }
+  const session = (await res.json()) as AuthSession;
+  const s = loadSyncSettings();
+  saveSyncSettings({
+    ...s,
+    accountEmail: session.user?.email ?? "",
+    sessionToken: session.token ?? "",
+    sessionExpiresAt: session.expiresAt ? (Date.parse(session.expiresAt) || 0) : 0,
+  });
+  return session;
+}
+
+/** 账号登录：成功后会话 Token 存本地设置，后续推送/拉取自动携带。 */
+export async function login(email: string, password: string): Promise<AuthSession> {
+  return authRequest("/auth/login", { email: email.trim(), password });
+}
+
+/** 账号注册：服务器已有账号后注册需邀请码（inviteCode 可选，403 invite_required 时由 UI 展开邀请码输入）。 */
+export async function register(email: string, password: string, inviteCode?: string): Promise<AuthSession> {
+  const body: Record<string, unknown> = { email: email.trim(), password };
+  if (inviteCode && inviteCode.trim()) body.inviteCode = inviteCode.trim();
+  return authRequest("/auth/register", body);
+}
+
+/** 退出登录：通知服务器作废会话（尽力而为），无论成败都清掉本地会话 Token。 */
+export async function logout(): Promise<void> {
+  const s = loadSyncSettings();
+  const base = s.serverEndpoint.trim().replace(/\/+$/, "");
+  const token = s.sessionToken.trim();
+  try {
+    if (base && token) {
+      await fetch(`${base}/auth/logout`, { method: "POST", headers: { Authorization: `Bearer ${token}` } });
+    }
+  } catch { /* 网络失败也照常清本地登录态 */ }
+  clearSession();
+}
+
+/** 查询当前登录账号（连接测试/状态展示用）：401 时清本地会话并提示重新登录。 */
+export async function fetchMe(): Promise<SyncAccountUser> {
+  const s = loadSyncSettings();
+  if (!s.sessionToken.trim()) throw new SyncServerError("尚未登录服务器账号");
+  const res = await serverFetch("/auth/me");
+  if (!res.ok) throw new SyncServerError(`获取账号信息失败：${(await readServerError(res)).message}`, res.status);
+  const j = (await res.json()) as { user: SyncAccountUser };
+  if (j.user?.email && j.user.email !== s.accountEmail) {
+    saveSyncSettings({ ...loadSyncSettings(), accountEmail: j.user.email });
+  }
+  return j.user;
 }
 
 /**
@@ -300,7 +425,7 @@ export async function pushToServer(packageText: string): Promise<ServerPushResul
     headers: { "Content-Type": "application/json" },
     body: packageText,
   });
-  if (!res.ok) throw new SyncServerError(`推送失败：${await readServerError(res)}`, res.status);
+  if (!res.ok) throw new SyncServerError(`推送失败：${(await readServerError(res)).message}`, res.status);
   return (await res.json()) as ServerPushResult;
 }
 
@@ -308,7 +433,7 @@ export async function pushToServer(packageText: string): Promise<ServerPushResul
 export async function pullFromServer(passphrase: string): Promise<SyncPayload> {
   const res = await serverFetch("/package/latest");
   if (res.status === 404) throw new SyncServerError("服务器上还没有同步包（404）：请先在任一台设备上推送一次", 404);
-  if (!res.ok) throw new SyncServerError(`拉取失败：${await readServerError(res)}`, res.status);
+  if (!res.ok) throw new SyncServerError(`拉取失败：${(await readServerError(res)).message}`, res.status);
   const text = await res.text();
   // 口令错误时 openSyncPackage 抛「同步口令错误或同步包已损坏」，与其它失败可区分
   return openSyncPackage(text, passphrase);
@@ -317,7 +442,7 @@ export async function pullFromServer(passphrase: string): Promise<SyncPayload> {
 /** 服务器版本列表（只读展示：version/设备/时间/大小）。 */
 export async function listServerPackages(): Promise<ServerPackageInfo[]> {
   const res = await serverFetch("/packages");
-  if (!res.ok) throw new SyncServerError(`读取服务器版本列表失败：${await readServerError(res)}`, res.status);
+  if (!res.ok) throw new SyncServerError(`读取服务器版本列表失败：${(await readServerError(res)).message}`, res.status);
   const j = (await res.json()) as { packages?: ServerPackageInfo[] };
   return Array.isArray(j.packages) ? j.packages : [];
 }

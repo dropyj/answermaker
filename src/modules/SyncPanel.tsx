@@ -3,9 +3,9 @@ import type { Account, CalEvent, Note, Project, ProjectLink, SystemEntry, Todo }
 import { call, isTauri } from "../bridge";
 import { decryptAllItems, isUnlocked } from "../crypto";
 import {
-  buildSyncPackage, checkServerHealth, checkSyncPassphrase, getDevice, listServerPackages,
-  loadSyncSettings, openSyncPackage, pullFromServer, pushToServer,
-  saveSyncSettings, setDeviceName, setSyncPassphrase, SYNC_FILENAME,
+  buildSyncPackage, checkServerHealth, checkSyncPassphrase, fetchMe, getDevice, listServerPackages,
+  loadSyncSettings, login, logout, openSyncPackage, pullFromServer, pushToServer, register,
+  saveSyncSettings, setDeviceName, setSyncPassphrase, SYNC_FILENAME, SyncServerError,
   type ServerPackageInfo, type SyncChannel, type SyncPayload, type SyncSettings,
 } from "../sync";
 
@@ -33,9 +33,17 @@ export default function SyncPanel({ data, onMerge }: {
   const [error, setError] = useState("");
   const [serverBusy, setServerBusy] = useState("");
   const [serverPkgs, setServerPkgs] = useState<ServerPackageInfo[] | null>(null);
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [authEmail, setAuthEmail] = useState(() => loadSyncSettings().accountEmail);
+  const [authPass, setAuthPass] = useState(""); // 账号密码：只在内存中，不落盘、不回显
+  const [inviteCode, setInviteCode] = useState("");
+  const [showInvite, setShowInvite] = useState(false);
+  const [authBusy, setAuthBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  const serverConfigured = settings.serverEndpoint.trim() !== "" && settings.serverToken.trim() !== "";
+  const loggedIn = settings.sessionToken.trim() !== "";
+  // 推送/拉取/版本列表可用条件：已登录，或填了高级兼容的手动设备 Token
+  const serverUsable = loggedIn || settings.serverToken.trim() !== "";
 
   const save = (next: SyncSettings) => { setSettings(next); saveSyncSettings(next); };
 
@@ -119,13 +127,52 @@ export default function SyncPanel({ data, onMerge }: {
 
   /* ---- 服务器端点通道 ---- */
 
-  const doHealth = async () => {
+  const doServerTest = async () => {
     setError(""); setMsg(""); setServerBusy("health");
     try {
-      const h = await checkServerHealth();
-      setMsg(`服务器连接正常：${h.service} v${h.version}（${settings.serverEndpoint.trim()}）`);
-    } catch (e) { setError(e instanceof Error ? e.message : "连接测试失败"); }
-    finally { setServerBusy(""); }
+      if (loggedIn) {
+        const me = await fetchMe();
+        setSettings(loadSyncSettings());
+        setMsg(`连接正常，当前登录账号：${me.email}（${settings.serverEndpoint.trim()}）`);
+      } else {
+        const h = await checkServerHealth();
+        setMsg(`服务器连接正常：${h.service} v${h.version}（${settings.serverEndpoint.trim()}），尚未登录账号`);
+      }
+    } catch (e) {
+      setSettings(loadSyncSettings()); // 会话过期时 sync.ts 已清本地登录态，刷新展示
+      setError(e instanceof Error ? e.message : "连接测试失败");
+    } finally { setServerBusy(""); }
+  };
+
+  const doAuth = async () => {
+    setError(""); setMsg("");
+    if (!authEmail.trim()) { setError("请输入账号邮箱"); return; }
+    if (!authPass) { setError("请输入账号密码"); return; }
+    setAuthBusy(true);
+    try {
+      const session = authMode === "login"
+        ? await login(authEmail, authPass)
+        : await register(authEmail, authPass, showInvite ? inviteCode : undefined);
+      setSettings(loadSyncSettings());
+      setAuthPass(""); // 密码不保留在界面状态里
+      setMsg(`${authMode === "login" ? "登录" : "注册并登录"}成功：${session.user.email}，会话到期 ${session.expiresAt ? new Date(session.expiresAt).toLocaleString() : "—"}。推送/拉取将按该账号隔离存储。`);
+    } catch (e) {
+      // 服务器要求邀请码时展开邀请码输入框（保留已填邮箱/密码方便重试）
+      if (e instanceof SyncServerError && (e.code === "invite_required" || e.code === "invite_invalid")) {
+        setShowInvite(true);
+      }
+      setError(e instanceof Error ? e.message : "登录失败");
+    } finally { setAuthBusy(false); }
+  };
+
+  const doLogout = async () => {
+    setError(""); setMsg(""); setAuthBusy(true);
+    try {
+      await logout();
+      setSettings(loadSyncSettings());
+      setServerPkgs(null);
+      setMsg("已退出登录（本地会话已清除）。手动设备 Token 若已填写仍可作为高级兼容方式使用。");
+    } finally { setAuthBusy(false); }
   };
 
   const doPush = async () => {
@@ -141,7 +188,7 @@ export default function SyncPanel({ data, onMerge }: {
       save({ ...loadSyncSettings(), lastSyncAt: Date.now(), lastSyncFrom: device.name, lastPushAt: Date.now(), lastPushMsg: result });
       setSettings(loadSyncSettings());
       setMsg(`已推送加密同步包到服务器：${result}（保险库${payload.vault ? `含 ${payload.vault.length} 条条目` : "未解锁，本次未包含"}）。服务器只保存密文。`);
-    } catch (e) { setError(e instanceof Error ? e.message : "推送失败"); }
+    } catch (e) { setSettings(loadSyncSettings()); setError(e instanceof Error ? e.message : "推送失败"); }
     finally { setServerBusy(""); }
   };
 
@@ -155,14 +202,14 @@ export default function SyncPanel({ data, onMerge }: {
       save({ ...loadSyncSettings(), lastSyncAt: Date.now(), lastSyncFrom: payload.deviceName, lastPullAt: Date.now(), lastPullMsg: `来源「${payload.deviceName}」：${summary}` });
       setSettings(loadSyncSettings());
       setMsg(`已从服务器拉取并合并（来源设备「${payload.deviceName}」）：${summary}`);
-    } catch (e) { setError(e instanceof Error ? e.message : "拉取失败"); }
+    } catch (e) { setSettings(loadSyncSettings()); setError(e instanceof Error ? e.message : "拉取失败"); }
     finally { setServerBusy(""); }
   };
 
   const doListPkgs = async () => {
     setError(""); setMsg(""); setServerBusy("list");
     try { setServerPkgs(await listServerPackages()); }
-    catch (e) { setError(e instanceof Error ? e.message : "读取服务器版本列表失败"); }
+    catch (e) { setSettings(loadSyncSettings()); setError(e instanceof Error ? e.message : "读取服务器版本列表失败"); }
     finally { setServerBusy(""); }
   };
 
@@ -197,12 +244,36 @@ export default function SyncPanel({ data, onMerge }: {
         )}
         {settings.channel === "server" && (
           <>
-            <input placeholder="服务器端点 URL，如 http://111.230.147.240:7362" value={settings.serverEndpoint} onChange={(e) => save({ ...settings, serverEndpoint: e.target.value })} />
-            <input type="password" placeholder="设备 Token（与服务器配对的 Bearer Token，只存本机）" value={settings.serverToken} onChange={(e) => save({ ...settings, serverToken: e.target.value })} />
+            <input placeholder="服务器端点 URL（默认 https://heytiger.cn/amsync，可改自建端点）" value={settings.serverEndpoint} onChange={(e) => save({ ...settings, serverEndpoint: e.target.value })} />
+            {loggedIn ? (
+              <p className="dim">
+                已登录账号：<strong>{settings.accountEmail || authEmail}</strong>
+                {settings.sessionExpiresAt > 0 && <> · 会话到期：{new Date(settings.sessionExpiresAt).toLocaleString()}</>}
+                {" "}<button disabled={authBusy} onClick={() => void doLogout()}>退出登录</button>
+              </p>
+            ) : (
+              <>
+                <select value={authMode} onChange={(e) => setAuthMode(e.target.value as "login" | "register")}>
+                  <option value="login">账号：登录已有账号</option>
+                  <option value="register">账号：注册新账号</option>
+                </select>
+                <input type="email" placeholder="账号邮箱" value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} autoComplete="username" />
+                <input type="password" placeholder="账号密码（不保存，只用于换取会话）" value={authPass} onChange={(e) => setAuthPass(e.target.value)} autoComplete={authMode === "login" ? "current-password" : "new-password"} />
+                {authMode === "register" && showInvite && (
+                  <input placeholder="邀请码（服务器已有账号后注册需要）" value={inviteCode} onChange={(e) => setInviteCode(e.target.value)} />
+                )}
+                <div className="row">
+                  <button disabled={authBusy} onClick={() => void doAuth()}>{authBusy ? "处理中…" : authMode === "login" ? "登录" : "注册并登录"}</button>
+                </div>
+              </>
+            )}
+            <details>
+              <summary className="dim">高级：手动 Token（兼容旧设备 Token，可不填）</summary>
+              <input type="password" placeholder="设备 Token（Bearer，只存本机；已登录账号时优先用会话 Token）" value={settings.serverToken} onChange={(e) => save({ ...settings, serverToken: e.target.value })} />
+            </details>
             <p className="hint">
-              服务器只保存 .amsync 密文包与版本元信息，保持零知识。当前端点走 HTTP 明文通道：链路上传输的只有密文包，
-              但<strong>设备 Token 在链路上明文可见</strong>，请只在可信网络使用；HTTPS 需要域名与证书，列为待办。
-              设备 Token 只存本机浏览器存储，不进同步包。
+              服务器只保存 .amsync 密文包与版本元信息，保持零知识；同步包按<strong>登录账号隔离存储</strong>，不同账号互不可见。
+              默认端点为官方服务（HTTPS）；也可改成自建端点。账号密码不落盘，只保存会话 Token 于本机浏览器存储，不进同步包。
             </p>
           </>
         )}
@@ -211,20 +282,20 @@ export default function SyncPanel({ data, onMerge }: {
       {settings.channel === "server" && (
         <div style={{ marginTop: 10 }}>
           <div className="row">
-            <button disabled={settings.serverEndpoint.trim() === "" || serverBusy !== ""} onClick={() => void doHealth()}>
+            <button disabled={settings.serverEndpoint.trim() === "" || serverBusy !== ""} onClick={() => void doServerTest()}>
               {serverBusy === "health" ? "测试中…" : "连接测试"}
             </button>
-            <button disabled={!serverConfigured || serverBusy !== ""} onClick={() => void doPush()}>
+            <button disabled={!serverUsable || serverBusy !== ""} onClick={() => void doPush()}>
               {serverBusy === "push" ? "推送中…" : "立即推送到服务器"}
             </button>
-            <button disabled={!serverConfigured || serverBusy !== ""} onClick={() => void doPull()}>
+            <button disabled={!serverUsable || serverBusy !== ""} onClick={() => void doPull()}>
               {serverBusy === "pull" ? "拉取中…" : "从服务器拉取并合并"}
             </button>
-            <button disabled={!serverConfigured || serverBusy !== ""} onClick={() => void doListPkgs()}>
+            <button disabled={!serverUsable || serverBusy !== ""} onClick={() => void doListPkgs()}>
               {serverBusy === "list" ? "读取中…" : "刷新服务器版本列表"}
             </button>
           </div>
-          {!serverConfigured && <p className="hint">填好端点 URL 与设备 Token 后，推送 / 拉取 / 版本列表按钮才可用（连接测试只需端点）。推送用上方同步口令校验，拉取用下方「导入用同步口令」。</p>}
+          {!serverUsable && <p className="hint">先登录服务器账号（或在「高级：手动 Token」里填写设备 Token）后，推送 / 拉取 / 版本列表按钮才可用（连接测试只需端点）。推送用上方同步口令校验，拉取用下方「导入用同步口令」。</p>}
           <p className="dim">
             上次推送：{settings.lastPushAt ? `${new Date(settings.lastPushAt).toLocaleString()}（${settings.lastPushMsg}）` : "尚未推送"}
             <br />
