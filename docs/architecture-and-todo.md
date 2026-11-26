@@ -142,6 +142,7 @@ docs/                      本文档等
 | `notes` / `todos` / `events` | id, data(JSON), created_at | 速记 / 待办 / 日程（WF2） |
 | `vault_attachments` | id, data(JSON), created_at | 保险库加密附件密文（WF3，每条目一个，≤5MB） |
 | `accounts` | id, data(JSON), created_at | 授权账号（WF5：personal-cloud / doc-source / popo 隔离） |
+| `doc_vectors` | chunk_id PK, doc_id/idx/model/dim/vec(base64) | 文档切块向量（项3，向量检索开启时生成） |
 | `retrieval_feedback` | id, query, chunk_id, doc_id, signal, kind, bm25_score, vec_score, created_at | 召回反馈（项3b，列式存储；见 §4.3） |
 | `meta` | key, value | 迁移标记 `migrated_from_localstorage=1` |
 
@@ -437,3 +438,12 @@ node scripts/sync-check.mjs  # 同步包加解密自查 4/4
 npm run cli -- search 关键词
 cargo test --manifest-path src-tauri/Cargo.toml   # 含密钥写入单测
 ```
+
+
+## 向量检索（项3，已落地）
+
+- 模型：`Xenova/bge-small-zh-v1.5`（transformers.js ONNX 量化版，512 维，约 100MB），选型理由：bge 是中文检索常用基线，small 版体积/速度适合桌面本地；首次开启在设置里下载并缓存，之后纯本地运行。查询侧加 bge-zh-v1.5 官方检索指令前缀，文档侧不加。
+- 开关：设置「语义检索（实验）」，默认关；关或模型未就绪时检索与纯 BM25 完全一致。开启时新入库切块自动生成向量（search.saveChunks 钩子），已有文档由设置页回填。
+- 存储：SQLite `doc_vectors`（chunk_id + Float32 base64），浏览器回退 localStorage；与 chunks 同生命周期（删文档/删切块同步删向量，db_save_docs 有孤儿清理兜底）。
+- 混合排序：候选 = BM25 命中 ∪ 余弦 ≥ 0.35 的向量命中；`hybrid = 0.5 * (bm25/本次最大bm25) + 0.5 * clamp(余弦, 0, 1)`；hybrid 作为 baseScore 进入召回反馈层（项3b 公式/面板不变）。聊天与搜索模式走 `searchKnowledge` 异步入口；命令面板仍用同步 BM25（快速跳转场景，不等模型）。
+- 自查：`npm run embedding:check`（Node + transformers.js 实测：cos(相近句)=0.6782 > cos(不相干句)=0.3426，PASS）。

@@ -20,7 +20,7 @@ import Mcp from "./modules/Mcp";
 import Settings from "./modules/Settings";
 import OllamaBootstrap from "./modules/OllamaBootstrap";
 import VaultHitCard from "./modules/VaultHitCard";
-import { MODELS, MODES, mockReply, ollamaChat, ragFallbackReply, retrieve, searchReply } from "./modules/Chat";
+import { MODELS, MODES, mockReply, ollamaChat, ragFallbackReply, retrieveAsync, searchReply } from "./modules/Chat";
 import { searchVault } from "./modules/vaultSearch";
 import { searchFiles } from "./files";
 import { tokenize, chunkText, saveChunks } from "./search";
@@ -31,6 +31,7 @@ import { isMcpFollowMain } from "./mcpPrefs";
 import { loadAppData, saveDocs as saveDocsDb, saveFiles as saveFilesDb, saveProjects as saveProjectsDb, saveLinks as saveLinksDb, saveSystems as saveSystemsDb, saveNotes as saveNotesDb, saveTodos as saveTodosDb, saveEvents as saveEventsDb, saveAttachments as saveAttachmentsDb, saveAccounts as saveAccountsDb } from "./db";
 import { initChunks } from "./search";
 import { initFeedback, chunkIdOf, explicitSignalOf, recordOpenFeedback, setExplicitFeedback } from "./feedback";
+import { initVectors } from "./embeddings";
 import { initVaultStore } from "./crypto";
 import type { Account, AgentCli, CalEvent, ChatMessage, ChatMode, FileEntry, KnowledgeDoc, ModelId, Note, OllamaStatus, Project, ProjectLink, SearchHit, SecretRequest, SystemEntry, Todo, VaultHit } from "./types";
 
@@ -260,6 +261,7 @@ export default function App() {
         const snap = await loadAppData();
         initChunks(snap.chunks);
         initFeedback(snap.feedback ?? []);
+        initVectors(snap.vectors ?? []);
         await initVaultStore(snap.vault);
         const restored = normalizeDocs(snap.docs);
         if (!alive) return;
@@ -509,12 +511,13 @@ export default function App() {
       } catch (e) {
         vaultError = String(e);
       }
-      setMessages([...history, searchReply(q, docs, vaultHits, locked, vaultError, searchFiles(q, files), searchSystems(q, systems))]);
+      const kbHits = await retrieveAsync(q, docs);
+      setMessages([...history, searchReply(q, docs, vaultHits, locked, vaultError, searchFiles(q, files), searchSystems(q, systems), kbHits)]);
       return;
     }
 
     // 智能聊天：自动匹配知识库 + 保险库
-    const hits = retrieve(q, docs);
+    const hits = await retrieveAsync(q, docs);
     let vaultHits: VaultHit[] = [];
     let vaultLocked = false;
     try {

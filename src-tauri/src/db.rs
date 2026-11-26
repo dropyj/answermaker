@@ -101,6 +101,15 @@ CREATE TABLE IF NOT EXISTS retrieval_feedback (
   created_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_feedback_chunk ON retrieval_feedback(chunk_id);
+CREATE TABLE IF NOT EXISTS doc_vectors (
+  chunk_id TEXT PRIMARY KEY,
+  doc_id TEXT NOT NULL,
+  idx INTEGER NOT NULL,
+  model TEXT NOT NULL,
+  dim INTEGER NOT NULL,
+  vec TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_vectors_doc ON doc_vectors(doc_id);
 "#;
 
 pub struct DbState(pub Mutex<Connection>);
@@ -126,6 +135,7 @@ pub struct DbSnapshot {
     pub accounts: Vec<Value>,
     pub attachments: Vec<Value>,
     pub feedback: Vec<Value>,
+    pub vectors: Vec<Value>,
     pub migrated: bool,
 }
 
@@ -327,6 +337,76 @@ pub fn db_save_feedback(
     tx.commit().map_err(|e| e.to_string())
 }
 
+/// 文档向量（项3）：chunkId + 模型名 + 维度 + Float32 base64。与 chunks 同生命周期。
+fn load_vectors(conn: &Connection) -> Result<Vec<Value>, String> {
+    let mut out = Vec::new();
+    let mut st = conn
+        .prepare("SELECT chunk_id, doc_id, idx, model, dim, vec FROM doc_vectors ORDER BY doc_id, idx")
+        .map_err(|e| e.to_string())?;
+    let rows = st
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, String>(5)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    for row in rows {
+        let (chunk_id, doc_id, idx, model, dim, vec) = row.map_err(|e| e.to_string())?;
+        out.push(serde_json::json!({
+            "chunkId": chunk_id,
+            "docId": doc_id,
+            "idx": idx,
+            "model": model,
+            "dim": dim,
+            "vec": vec,
+        }));
+    }
+    Ok(out)
+}
+
+/// 保存某文档的全部向量（先删后插，与 db_save_chunks 语义一致）。
+#[tauri::command]
+pub fn db_save_vectors(
+    state: tauri::State<'_, DbState>,
+    doc_id: String,
+    items: Vec<Value>,
+) -> Result<(), String> {
+    let mut conn = lock(&state)?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM doc_vectors WHERE doc_id = ?1", params![doc_id])
+        .map_err(|e| e.to_string())?;
+    {
+        let mut st = tx
+            .prepare("INSERT INTO doc_vectors(chunk_id, doc_id, idx, model, dim, vec) VALUES(?1, ?2, ?3, ?4, ?5, ?6)")
+            .map_err(|e| e.to_string())?;
+        for item in &items {
+            st.execute(params![
+                item["chunkId"].as_str().unwrap_or(""),
+                doc_id,
+                item["idx"].as_i64().unwrap_or(0),
+                item["model"].as_str().unwrap_or(""),
+                item["dim"].as_i64().unwrap_or(0),
+                item["vec"].as_str().unwrap_or(""),
+            ])
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_delete_vectors(state: tauri::State<'_, DbState>, doc_id: String) -> Result<(), String> {
+    let conn = lock(&state)?;
+    conn.execute("DELETE FROM doc_vectors WHERE doc_id = ?1", params![doc_id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 pub fn db_load_all(state: tauri::State<'_, DbState>) -> Result<DbSnapshot, String> {
     let conn = lock(&state)?;
@@ -387,6 +467,7 @@ pub fn db_load_all(state: tauri::State<'_, DbState>) -> Result<DbSnapshot, Strin
         accounts: load_table(&conn, "accounts")?,
         attachments: load_table(&conn, "vault_attachments")?,
         feedback: load_feedback(&conn)?,
+        vectors: load_vectors(&conn)?,
         docs,
         files,
         chunks,
@@ -431,6 +512,11 @@ pub fn db_save_docs(state: tauri::State<'_, DbState>, docs: Vec<Value>) -> Resul
     // chunks left by an interrupted import).
     tx.execute(
         "DELETE FROM chunks WHERE doc_id NOT IN (SELECT id FROM docs)",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "DELETE FROM doc_vectors WHERE doc_id NOT IN (SELECT id FROM docs)",
         [],
     )
     .map_err(|e| e.to_string())?;

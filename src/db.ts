@@ -8,6 +8,16 @@ import type { Account, CalEvent, FileEntry, KnowledgeDoc, Note, Project, Project
 
 export type VaultSnapshot = { meta: unknown | null; items: unknown[] };
 
+/** 文档向量（项3）：chunkId（docId#idx）+ 模型名 + 维度 + Float32 数组 base64。 */
+export interface DocVector {
+  chunkId: string;
+  docId: string;
+  idx: number;
+  model: string;
+  dim: number;
+  vec: string; // base64(Float32Array bytes)
+}
+
 export type DbSnapshot = {
   docs: KnowledgeDoc[];
   files: FileEntry[];
@@ -22,6 +32,7 @@ export type DbSnapshot = {
   accounts: Account[];
   attachments: unknown[];
   feedback: RetrievalFeedback[];
+  vectors: DocVector[];
   migrated: boolean;
 };
 
@@ -40,6 +51,7 @@ const KEYS = {
   accounts: "am_accounts",
   attachments: "am_vault_attachments",
   feedback: "am_feedback",
+  vectors: "am_doc_vectors",
 };
 
 function read<T>(key: string, fallback: T): T {
@@ -89,6 +101,7 @@ function localSnapshot(): DbSnapshot {
     accounts: read<Account[]>(KEYS.accounts, []),
     attachments: read<unknown[]>(KEYS.attachments, []),
     feedback: read<RetrievalFeedback[]>(KEYS.feedback, []),
+    vectors: read<DocVector[]>(KEYS.vectors, []),
     migrated: true,
   };
 }
@@ -109,6 +122,15 @@ async function importLocal(snap: DbSnapshot) {
   await call("db_save_accounts", { items: snap.accounts });
   await call("db_save_vault_attachments", { items: snap.attachments });
   await call("db_save_feedback", { items: snap.feedback });
+  const vectorsByDoc = new Map<string, DocVector[]>();
+  for (const v of snap.vectors) {
+    const list = vectorsByDoc.get(v.docId) ?? [];
+    list.push(v);
+    vectorsByDoc.set(v.docId, list);
+  }
+  for (const [docId, items] of vectorsByDoc) {
+    await call("db_save_vectors", { docId, items });
+  }
   await call("db_mark_migrated");
 }
 
@@ -234,6 +256,25 @@ export async function saveFeedback(items: RetrievalFeedback[]) {
     return;
   }
   await call("db_save_feedback", { items });
+}
+
+/** 保存某文档的全部向量（与 chunks 同生命周期：先删后插语义在 Rust 侧）。 */
+export async function saveVectors(docId: string, items: DocVector[]) {
+  if (!isTauri()) {
+    const all = read<DocVector[]>(KEYS.vectors, []).filter((v) => v.docId !== docId);
+    localStorage.setItem(KEYS.vectors, JSON.stringify([...all, ...items]));
+    return;
+  }
+  await call("db_save_vectors", { docId, items });
+}
+
+export async function deleteVectors(docId: string) {
+  if (!isTauri()) {
+    const all = read<DocVector[]>(KEYS.vectors, []).filter((v) => v.docId !== docId);
+    localStorage.setItem(KEYS.vectors, JSON.stringify(all));
+    return;
+  }
+  await call("db_delete_vectors", { docId });
 }
 
 /** 存储信息（设置页展示 SQLite 路径与数据量）。 */

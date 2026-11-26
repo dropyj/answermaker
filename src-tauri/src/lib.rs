@@ -302,6 +302,8 @@ pub fn run() {
             db::db_save_accounts,
             db::db_save_vault_attachments,
             db::db_save_feedback,
+            db::db_save_vectors,
+            db::db_delete_vectors,
             db::db_mark_migrated,
             db::db_info,
             vault_list,

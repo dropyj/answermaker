@@ -1,5 +1,5 @@
 import type { ChatMessage, ChatMode, FileEntry, KnowledgeDoc, ModelId, SearchHit, SystemEntry, VaultHit } from "../types";
-import { bm25Search } from "../search";
+import { bm25Search, searchKnowledge } from "../search";
 
 export const MODELS: { id: ModelId; label: string }[] = [
   { id: "ollama", label: "Ollama 本地" },
@@ -20,6 +20,14 @@ const names = new Map(indexed.map((d) => [d.id, d.name]));
 return bm25Search(q, names, limit);
 }
 
+/** 异步检索：语义检索开启时走 BM25+向量混合（searchKnowledge），否则同 retrieve。 */
+export async function retrieveAsync(q: string, docs: KnowledgeDoc[], limit = 5): Promise<SearchHit[]> {
+const indexed = docs.filter((d) => d.status === "indexed");
+if (indexed.length === 0) return [];
+const names = new Map(indexed.map((d) => [d.id, d.name]));
+return searchKnowledge(q, names, limit);
+}
+
 export function searchReply(
   q: string,
   docs: KnowledgeDoc[],
@@ -28,8 +36,9 @@ export function searchReply(
   vaultError = "",
   fileHits: FileEntry[] = [],
   systemHits: SystemEntry[] = [],
+  precomputedHits?: SearchHit[],
 ): ChatMessage {
-  const hits = retrieve(q, docs);
+  const hits = precomputedHits ?? retrieve(q, docs);
   const secretHits = vaultHits.filter((h) => h.matchedSecret).length;
   const parts: string[] = [];
   if (systemHits.length > 0) parts.push(`系统导航命中 ${systemHits.length} 条`);
@@ -37,7 +46,7 @@ export function searchReply(
   if (vaultHits.length > 0) {
     parts.push(`保险库命中 ${vaultHits.length} 条${secretHits > 0 ? `（其中 ${secretHits} 条命中密码内容）` : ""}`);
   }
-  if (hits.length > 0) parts.push(`知识库 BM25 命中 ${hits.length} 个片段`);
+  if (hits.length > 0) parts.push(`知识库${hits.some((h) => h.vecScore !== undefined) ? "混合检索（BM25+向量）" : "BM25"}命中 ${hits.length} 个片段`);
   const text =
     parts.length > 0
       ? `本地搜索：${parts.join("；")}。知识片段已高亮关键词；文件/链接卡片可直接打开源地址；保险库结果为卡片展示，可直接复制密码或 JSON。`

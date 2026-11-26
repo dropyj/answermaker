@@ -3,6 +3,7 @@
     "@fortawesome/fontawesome-free": "^7.3.1",
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-dialog": "^2.8.4",
+    "@xenova/transformers": "^2.17.2",
     "pdfjs-dist": "^6.5.438",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
@@ -26,7 +27,8 @@
     "mcp:smoke": "node scripts/mcp-smoke.mjs",
     "sync:check": "node scripts/sync-server-check.mjs",
     "cli": "node cli/answermaker.mjs",
-    "feedback:check": "node scripts/feedback-check.mjs"
+    "feedback:check": "node scripts/feedback-check.mjs",
+    "embedding:check": "node scripts/embedding-check.mjs"
   },
   "type": "module",
   "version": "0.2.0",
