@@ -28,6 +28,14 @@ body { margin: 0; font-family: "Segoe UI", system-ui, sans-serif; background: #f
 .hint { color: #5b6578; font-size: 13px; line-height: 1.7; }
 .list { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 10px; }
 .card { background: #fff; border: 1px solid #e3e6f0; border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; }
+.collapsible-head { display: flex; align-items: center; gap: 10px; width: 100%; align-self: stretch; padding: 2px 0; border: 0; background: transparent; border-radius: 6px; text-align: left; cursor: pointer; font-size: 15px; }
+.collapsible-head:hover:not(:disabled) { background: transparent; }
+.collapsible-head:hover .collapsible-title { color: var(--accent-strong); }
+.collapsible-title { font-weight: 600; flex-shrink: 0; transition: color .15s ease; }
+.collapsible-summary { color: #8a93a8; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.collapsible-arrow { margin-left: auto; flex-shrink: 0; width: 0; height: 0; border-left: 6px solid #8a93a8; border-top: 4.5px solid transparent; border-bottom: 4.5px solid transparent; transition: transform .18s ease; }
+.collapsible-arrow.open { transform: rotate(90deg); }
+.collapsible-body:not([hidden]) { display: flex; flex-direction: column; gap: 6px; }
 .badge { background: var(--accent-soft); color: var(--accent); border-radius: 999px; padding: 1px 8px; font-size: 12px; margin-left: 6px; }
 .badge.warn { background: #fff3e0; color: #b26a00; }
 .mono { font-family: Consolas, monospace; font-size: 13px; word-break: break-all; }

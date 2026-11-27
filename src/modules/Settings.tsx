@@ -16,6 +16,7 @@ import AccountsPanel from "./AccountsPanel";
 import FeedbackPanel from "./FeedbackPanel";
 import ModelManagerPanel from "./ModelManager";
 import ChatModelManager from "./ChatModelManager";
+import CollapsibleSection from "../components/CollapsibleSection";
 import type { Account, FileEntry, KnowledgeDoc } from "../types";
 import type { Dispatch, SetStateAction } from "react";
 import type { SyncPayload } from "../sync";
@@ -229,6 +230,12 @@ export default function Settings({ syncData, onSyncMerge, accountsData, feedback
         ? <span className="badge ok">已登录</span>
         : <span className="badge warn">未登录</span>;
 
+  const ollamaSummary = !tauri
+    ? "浏览器预览模式不可用"
+    : !ollama
+      ? "检测中…"
+      : `Ollama ${ollama.installed ? "已安装" : "未安装"} · 服务${ollama.running ? "运行中" : "未运行"} · 已下载 ${ollama.models.length} 个模型`;
+
   return (
     <div className="panel">
       <h2>设置 Settings</h2>
@@ -276,8 +283,7 @@ export default function Settings({ syncData, onSyncMerge, accountsData, feedback
         </div>
       </div>
 
-      <h3>本地模型（Ollama）</h3>
-      <div className="card">
+      <CollapsibleSection id="ollama-runtime" title="本地模型（Ollama）" summary={ollamaSummary} defaultOpen={false}>
         <div>
           安装：{ollama?.installed ? <span className="badge ok">已安装</span> : <span className="badge warn">未安装</span>}
           {" "}· 服务：{ollama?.running ? <span className="badge ok">运行中</span> : <span className="badge warn">未运行</span>}
@@ -300,7 +306,7 @@ export default function Settings({ syncData, onSyncMerge, accountsData, feedback
           <button disabled={!tauri || localBusy !== ""} onClick={() => void refreshLocal()}>刷新</button>
         </div>
         {localMsg && <div className="dim">{localMsg}</div>}
-      </div>
+      </CollapsibleSection>
 
       <h3>本地 Agent CLI</h3>
       <p className="hint">

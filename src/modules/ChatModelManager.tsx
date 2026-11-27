@@ -9,6 +9,7 @@ import {
   getPullState, getServiceState, pullModel, setChatModel,
 } from "../ollamaModels";
 import { CHAT_MODEL_EVENT } from "../chatModels";
+import CollapsibleSection from "../components/CollapsibleSection";
 
 const fmtBytes = (n?: number) => {
   if (!n || n <= 0) return "—";
@@ -95,9 +96,15 @@ export default function ChatModelManager() {
     return installed.some((x) => tagMatches(x.name, m.tag)) ? "downloaded" as const : "not-downloaded" as const;
   };
 
+  // 折叠摘要（与面板内部同源：service/current/installed/pull 进度均为同一批状态直读）
+  const pullingModel = CHAT_MODELS.find((m) => getPullState(m.tag)?.status === "downloading");
+  const pullPercent = pullingModel ? getPullState(pullingModel.tag)?.progress?.percent ?? 0 : null;
+  const summary = `Ollama ${service === "available" ? "已连接" : service === "unavailable" ? "未运行" : "检测中"}`
+    + ` · 当前聊天模型：${current} · 已安装 ${installed.length} 个`
+    + (pullPercent !== null ? ` · 下载中 ${pullPercent.toFixed(0)}%` : "");
+
   return (
-    <div className="card">
-      <h3>聊天本地模型（Ollama）</h3>
+    <CollapsibleSection id="chat-models" title="聊天本地模型（Ollama）" summary={summary} defaultOpen={false}>
       <p className="hint">
         管理 Ollama 里的对话模型（以 Qwen 系列为主）：下载状态与占用大小来自 Ollama 服务的实时数据
         （<span className="mono">/api/tags</span>），不是本地估算。下载走 <span className="mono">/api/pull</span> 流式进度，
@@ -214,6 +221,6 @@ export default function ChatModelManager() {
         删除当前聊天模型后会自动回退到任一剩余已安装模型（都没有时回默认 qwen2.5:3b），聊天区会收到同步通知。
         大模型（如 14B/32B）首次下载时间较长，请留意进度条的速度与预计剩余时间。
       </p>
-    </div>
+    </CollapsibleSection>
   );
 }

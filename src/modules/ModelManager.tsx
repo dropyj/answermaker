@@ -10,6 +10,7 @@ import {
   getModelEntry, getRegistry,
 } from "../modelManager";
 import { allChunks } from "../search";
+import CollapsibleSection from "../components/CollapsibleSection";
 
 const fmtBytes = (n?: number) => {
   if (!n || n <= 0) return "—";
@@ -130,9 +131,14 @@ export default function ModelManagerPanel() {
     : status === "not-downloaded" ? "已开启，但启用模型尚未下载"
     : enabled ? "已开启，模型待加载" : "未开启";
 
+  // 折叠摘要（与面板内部同源：enabled/activeInfo/count 来自语义状态，下载进度直读 modelManager）
+  const downloadingModel = EMBEDDING_MODELS.find((m) => registry[m.id]?.status === "downloading");
+  const dlPercent = downloadingModel ? getDownloadProgress(downloadingModel.id)?.percent ?? 0 : null;
+  const summary = `语义检索${enabled ? "已开启" : "未开启"} · 当前启用：${activeInfo.name} · 向量 ${count} 条`
+    + (dlPercent !== null ? ` · 下载中 ${dlPercent.toFixed(0)}%` : "");
+
   return (
-    <div className="card">
-      <h3>本地模型 / 语义检索（实验）</h3>
+    <CollapsibleSection id="semantic-models" title="本地模型 / 语义检索（实验）" summary={summary} defaultOpen={enabled}>
       <p className="hint">
         在 BM25 之上叠加本地向量通道：换个说法也能召回语义相近的片段，混合分作为基础分继续走召回反馈层。
         模型<strong>只能手动下载</strong>（点下方各模型的下载按钮），程序不会自动下载；下载后纯本地运行，不联网、不上传。
@@ -228,6 +234,6 @@ export default function ModelManagerPanel() {
         已下载状态以本机注册表为准：若手动清过浏览器/Tauri 缓存导致状态不一致，对该模型点「删除」后重新下载即可恢复。
         切换模型后旧模型的向量不会被混用，索引不完整时上方会出现一键重建入口。
       </p>
-    </div>
+    </CollapsibleSection>
   );
 }
