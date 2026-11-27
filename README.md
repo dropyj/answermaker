@@ -369,13 +369,14 @@ popo-cli auth login     # 浏览器 OpenID 登录（CLI 自动打开浏览器）
 - **跨设备加密同步（零知识）**：独立同步口令把保险库（解锁时）+ 项目/系统/笔记/待办/日程打包加密为 `.amsync`（PBKDF2 + AES-GCM，文件头无明文），按 id + 更新时间合并，保险库导入后按本机主密码重加密。通道：本地文件夹（已实现）、同步盘/Git 文件夹（同一机制）、自托管服务器端点（已实现：端点默认预填 `https://heytiger.cn/amsync`，可用邮箱+密码注册/登录账号后连接测试、推送、拉取合并、查看服务器版本列表；契约见下）。口令丢失无法恢复。浏览器预览下降级为手动导出/导入文件
 - **同步服务器契约概要**：Base URL 为设置里的端点（默认 `https://heytiger.cn/amsync`，可改自建端点；端点已含 `/amsync` 前缀语义，以下路径相对基址）。**账号登录（主路径）**：`POST /auth/register {email, password, inviteCode?}` 与 `POST /auth/login {email, password}` → `{token, user:{id,email}, expiresAt}`（注册错误含 409 邮箱已存在、400 密码弱/邮箱格式、403 需邀请码/邀请码无效——服务器已有账号后再注册需要邀请码；登录 401 凭据错误、429 尝试过多）；`POST /auth/logout`、`GET /auth/me` 用会话 Token。登录后 `/package` 等请求带 `Authorization: Bearer <会话Token>` 与 `X-Device-Id` / `X-Device-Name` 头，服务器**按账号隔离存储**同步包；会话 401 时客户端清本地会话并提示重新登录。手动设备 Token 保留为「高级」兼容项（设置里折叠区，未登录时可用）。`PUT /package` 上传 `.amsync` 原文（上限 20MB，超限 413）→ `{ok, version, size, updatedAt}`；`GET /package/latest` 下载最新包（无包 404）；`GET /packages` 列最近 10 个版本；`GET /health` 无需鉴权。客户端推送前会断言包体是加密格式（含明文字段直接拒绝），拉取后用同步口令解密并按既有 id + updatedAt 规则合并。账号密码不落盘，只存会话 Token 于本机。自查：`npm run sync:check`（本地 mock server 实测设备 Token 兼容路径全链路）
 - **密钥健康与加密附件**：条目可设到期日与环境（prod/test/dev），7 天内到期标黄、过期标红，今日简报汇总；复制/经 MCP 取用自动更新最近使用时间；每条目可附一个 ≤5MB 文件，会话密钥加密存储，MCP 只标注 `hasAttachment` 不暴露内容
-- **PDF 正文解析**：拖入 PDF 逐页抽取文本层真实切块入库（pdfjs 本地打包，不走 CDN），状态显示「已入库（PDF 解析，N 页）」；扫描版无文本层时明确提示并仅登记。Word(.docx) 仍仅登记
+- **PDF 正文解析**：拖入 PDF 逐页抽取文本层真实切块入库（pdfjs 本地打包，不走 CDN），状态显示「已入库（PDF 解析，N 页）」；扫描版无文本层时明确提示并仅登记
+- **Office 正文解析**：拖入 .docx 经 mammoth 抽正文、.xlsx/.xls 经 SheetJS 逐工作表转文本，真实切块入库（懒加载，不拖首屏；只读解析不执行公式）；抽不到正文时明确提示并仅登记。自查 `npm run office:check`
 - **账号隔离**：个人云账号与文档授权账号分开管理；在线导入先选当前账号，数据按 accountId 归属，列表徽标 + 按账号筛选；断开只影响该账号（默认保留其文档）。旧 POPO 数据自动迁移到默认账号「网易 POPO（工作）」。**边界：POPO 登录会话由 popo-cli 统一托管，多账号会话隔离受 CLI 限制**——隔离在数据层真实实现，会话层不假装；其他 provider（Google/Notion/飞书/WebDAV）只做建模占位，授权标「待接入」
 
 ## V0.2 未实现（如实标注）
 
 - **Rust 原生**：已在本机编译通过（`cargo check` / `tauri dev`）；`vault_crypto.rs` 的 Argon2id 实现已接线（本次改动在本机无 cargo 环境下完成，新增命令待下一次 Windows `cargo check` 复核）
-- **Word 解析**：拖入 .docx 只登记元数据并明确提示，不切块（PDF 已支持文本层解析，见 V0.4）
+- **Office 解析边界**：.docx/.xlsx/.xls 已支持正文抽取（见 V0.4）；.doc/.ppt 等旧格式仍只登记元数据并明确提示，不切块
 - **在线文档**：KM / POPO 文档已经 popo-cli 真实读取并按链接手动入库；其他域名仍仅登记（受 CORS/鉴权限制）；内容/权限/删除的自动同步（ETag/版本校验）未实现
 - **云端向量库**：仅预留接口，界面标注「待开发」，不实现、不上传
 - **Embedding/向量检索**：当前检索为 BM25 关键词检索；bge-m3 + LanceDB 混合检索为桌面端规划

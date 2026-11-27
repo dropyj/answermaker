@@ -214,7 +214,9 @@ sim = token 集合 Jaccard（复用 BM25 的 tokenize，含中文 bigram；相�
 
 - 文本类：`.txt .md .csv .json .html` 真实读取；HTML 去标签
 - KM/POPO：经 popo-cli 拉正文
-- PDF/Word 等：仅登记元数据（无切块）
+- PDF：pdfjs 逐页抽文本层真实入库；无文本层（扫描件）仅登记并提示
+- Office（优化项4）：`.docx` 经 mammoth（`src/office.ts`，动态 import 懒加载）抽正文纯文本真实入库；`.xlsx/.xls` 经 SheetJS 只读解析逐工作表转文本（「## 工作表：名」标题行 + 制表符拼行、纯空行压缩）真实入库。只用 read/sheet_to_csv 等只读 API，不执行公式/宏（xlsx 包有已知原型污染告警，故只读使用、不写回）。抽取为空（正文有效字符 < 20）或失败时降级仅登记，文档状态如实写明原因，与扫描 PDF 同口径。状态文案：「已入库（Word 解析）」「已入库（表格解析，N 个工作表）」。自查 `npm run office:check`（jszip 手工拼最小 OOXML docx + SheetJS 写出双表 xlsx，断言抽出文本）。
+- 其他格式：仅登记元数据（无切块）
 - 每条保留 `origin` 与 `importedAt`，可复制/编辑来源
 
 ### 5.2 保险库
@@ -370,7 +372,7 @@ am audit tail [n]
 9. **OpenAI / Claude 真实接入**：当前为本地模拟；需 API Key 管理（可入保险库）、流式响应、错误重试。
 10. **流式输出**：Ollama 与 Agent 目前非流式；改为逐 token/逐行展示与可取消。
 11. **向量/混合检索**：bge-m3 embedding + sqlite-vec / LanceDB；当前 BM25 全量载入内存，数据量大时内存与延迟上升。
-12. **PDF / Word / Excel 解析**：PDF ✅ WF4 已落地（文本层抽取入库，扫描件仅登记）；剩余 Word(.docx)/Excel 仍仅登记，需文本抽取、表格与页级溯源。
+12. **PDF / Word / Excel 解析**：PDF ✅ WF4 已落地（文本层抽取入库，扫描件仅登记）；Word(.docx)/Excel ✅ 优化项4 已落地（mammoth/SheetJS 抽正文入库，见 §5.1）；剩余表格/页级溯源细化。
 13. **在线文档自动同步**：ETag/版本校验、权限与删除同步；目前仅手动读取入库。
 14. **MCP 能力扩展**：notes/todos/events 写工具 ✅ WF2 已落地（ingest 队列落库）；剩余受控 `knowledge_ingest`、resources/prompts、GET/SSE 与会话、协议版本升级。
 15. **保险库匹配识别真实化**：当前候选为模拟结果；需实际扫描 `.ssh`、`.env` 等并预览/去重。
@@ -413,7 +415,7 @@ am audit tail [n]
 - OpenAI / Claude 模型仍为模拟回复
 - 保险库匹配识别为模拟候选
 - `vault_crypto.rs`、`vault_*`/`knowledge_ingest`/`chat_send` 为旧桩
-- Word/Excel 不解析正文（PDF 已支持文本层；扫描版 PDF 无文本层仅登记）
+- Word/Excel 已可解析正文（优化项4）；扫描版 PDF 无文本层仅登记；抽不到正文的 Office 文件仅登记
 - POPO 多账号**会话**隔离受 popo-cli 限制：登录态由 CLI 统一托管，应用只做数据归属/筛选/断开/审计层隔离
 - 同步服务器通道默认端点已上 HTTPS（https://heytiger.cn/amsync）并改为账号登录（会话 Token 按账号隔离）；自建端点若用 HTTP 明文，链路上 Token 明文可见，只建议可信网络使用。浏览器预览下文件夹同步降级为手动导出/导入文件
 - 本批新增 Rust 命令（db_save_projects/links/systems/notes/todos/events/accounts/vault_attachments、mcp_ingest_pending/ack、write_text_file、read_binary_file_base64）未在 VM 编译（无 cargo），需 Windows cargo check

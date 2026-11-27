@@ -38,6 +38,7 @@ yarn-error.log*
 pnpm-debug.log*
 *.local
 *.tmp
+.tmp-office-check-*/
 
 # 操作系统 / 编辑器
 .DS_Store
