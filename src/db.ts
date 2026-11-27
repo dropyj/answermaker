@@ -277,6 +277,15 @@ export async function deleteVectors(docId: string) {
   await call("db_delete_vectors", { docId });
 }
 
+/** 清空全部文档向量（模型切换后一键重建索引的第一步）。 */
+export async function clearAllVectors() {
+  if (!isTauri()) {
+    localStorage.setItem(KEYS.vectors, JSON.stringify([]));
+    return;
+  }
+  await call("db_clear_vectors");
+}
+
 /** 存储信息（设置页展示 SQLite 路径与数据量）。 */
 export type DbInfo = {
   path: string; docs: number; chunks: number; files: number; vaultItems: number;

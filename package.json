@@ -30,7 +30,8 @@
     "sync:check": "node scripts/sync-server-check.mjs",
     "cli": "node cli/answermaker.mjs",
     "feedback:check": "node scripts/feedback-check.mjs",
-    "embedding:check": "node scripts/embedding-check.mjs"
+    "embedding:check": "node scripts/embedding-check.mjs",
+    "models:check": "node scripts/models-check.mjs"
   },
   "type": "module",
   "version": "0.2.0",

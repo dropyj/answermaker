@@ -442,11 +442,31 @@ cargo test --manifest-path src-tauri/Cargo.toml   # 含密钥写入单测
 
 ## 向量检索（项3，已落地）
 
-- 模型：`Xenova/bge-small-zh-v1.5`（transformers.js ONNX 量化版，512 维，约 100MB），选型理由：bge 是中文检索常用基线，small 版体积/速度适合桌面本地；首次开启在设置里下载并缓存，之后纯本地运行。查询侧加 bge-zh-v1.5 官方检索指令前缀，文档侧不加。
-- 开关：设置「语义检索（实验）」，默认关；关或模型未就绪时检索与纯 BM25 完全一致。开启时新入库切块自动生成向量（search.saveChunks 钩子），已有文档由设置页回填。
-- 存储：SQLite `doc_vectors`（chunk_id + Float32 base64），浏览器回退 localStorage；与 chunks 同生命周期（删文档/删切块同步删向量，db_save_docs 有孤儿清理兜底）。
+- 模型：transformers.js ONNX 量化版，本地运行（WASM 推理，无需服务/API Key）。模型目录见下「本地模型管理」节，默认推荐 `Xenova/bge-small-zh-v1.5`（512 维，量化版约 25MB）；查询/文档前缀按各模型官方用法（目录 `queryPrefix`/`docPrefix`，如 bge-zh 查询侧加检索指令前缀、文档侧不加；e5 系列查询 `query: `、文档 `passage: `）。
+- 开关：设置「本地模型 / 语义检索（实验）」，默认关；关或模型未就绪时检索与纯 BM25 完全一致。开启时新入库切块自动生成向量（search.saveChunks 钩子），已有文档由设置页回填。
+- 存储：SQLite `doc_vectors`（chunk_id + Float32 base64，带 model 字段，不同模型向量互不混用），浏览器回退 localStorage；与 chunks 同生命周期（删文档/删切块同步删向量，db_save_docs 有孤儿清理兜底）。
 - 混合排序：候选 = BM25 命中 ∪ 余弦 ≥ 0.35 的向量命中；`hybrid = 0.5 * (bm25/本次最大bm25) + 0.5 * clamp(余弦, 0, 1)`；hybrid 作为 baseScore 进入召回反馈层（项3b 公式/面板不变）。聊天与搜索模式走 `searchKnowledge` 异步入口；命令面板仍用同步 BM25（快速跳转场景，不等模型）。
 - 自查：`npm run embedding:check`（Node + transformers.js 实测：cos(相近句)=0.6782 > cos(不相干句)=0.3426，PASS）。
+
+## 本地模型管理（模型管理区，已落地）
+
+- 实现：`src/models.ts`（目录 + 注册表 + 进度聚合 + 状态机，纯逻辑）、`src/modelManager.ts`（下载/取消/删除）、`src/modules/ModelManager.tsx`（设置页 UI）、`src/embeddings.ts`（多模型运行时）。目录（体积为量化版实测：onnx/model_quantized.onnx + tokenizer.json 的 content-length 之和取整，另有少量小文件，以实际下载为准）：
+
+  | 模型 | 维度 | 约体积 | 语言 | 说明 |
+  |---|---|---|---|---|
+  | Xenova/bge-small-zh-v1.5（默认推荐） | 512 | 25MB | 中文为主 | 速度最快，日常知识库够用；MIT |
+  | Xenova/bge-base-zh-v1.5 | 768 | 103MB | 中文为主 | 精度/体积平衡；MIT |
+  | Xenova/bge-large-zh-v1.5 | 1024 | 328MB | 中文为主 | 系列精度最高、最慢，建议内存 ≥ 8GB；MIT |
+  | Xenova/multilingual-e5-small | 384 | 135MB | 100+ 语言 | 多语言/跨语言；MIT |
+  | Xenova/multilingual-e5-base | 768 | 296MB | 100+ 语言 | 多语言精度更高；MIT |
+
+  原计划的 m3e-small/base 在 Xenova 名下无转换版（HF API 401、作者搜索为空，2026-11-27 核对），以同级 multilingual-e5-small/base 替代。各模型卡片在 UI 展示简介、维度、语言、体积、磁盘/内存要求、速度与精度特点、许可证。
+- 【手动下载原则】模型只能由用户在模型管理区点「下载」触发，程序绝不自动下载：开启语义检索时若启用模型未下载，`embeddings.ensureModel` 的注册表门禁会拒绝加载、状态置 `not-downloaded`，检索保持纯 BM25，UI 提示去下载。下载用 pipeline 的 progress_callback 聚合成总体进度（百分比/已下载/总大小/滑动平均速度/预计剩余，约 200ms 节流通知 UI）。
+- 下载状态近似：transformers.js 的浏览器缓存（Cache Storage `transformers-cache`）没有可靠的枚举/计量 API，「是否已下载/占用大小」以 localStorage 注册表 `am_model_registry` 为准（完成时按各文件 total 汇总 sizeBytes）；注册表与真实缓存不一致时（如手动清过缓存），对该模型删除后重新下载即可恢复。页面重启时残留的 downloading 状态按中断处理回未下载。
+- 取消语义（如实）：transformers.js v2 不支持 AbortSignal，取消 = 置取消标志 + UI 立即回未下载 + 按 URL 含模型 id 尽力清 `transformers-cache` 部分缓存；底层请求可能仍在后台跑完，但迟到的进度/完成一律忽略、结果丢弃，不会改回已下载。
+- 删除：清该模型缓存条目 + 注册表回未下载；删的是当前启用模型时 extractor 丢弃、语义状态回退 `not-downloaded`（开启时）并提示检索已降级纯 BM25。
+- 切换与重建：同一时间只启用一个模型（设置 `am_semantic_settings {enabled, modelId}`，旧格式只有 enabled 时 modelId 缺省回默认）。切换后内存索引按新模型重新过滤（doc_vectors 的 model 字段隔离），新模型向量数 < 全部切块数时模型区顶部出现提示条 + 「一键重建索引」：先 `db_clear_vectors` 清空全部向量（浏览器回退清 localStorage），再用当前模型 backfill 全量重建（带进度）。旧维度向量不会被混用——维度不同余弦无意义，索引不完整期间语义通道只用已有部分、其余走 BM25。
+- 自查：`npm run models:check`（目录完整性/进度聚合数学/状态机/注册表往返 + bge-small 真实 pipeline 加载，25/25 PASS）。
 
 
 ## 安装包与自动更新（项4，已落地代码侧）

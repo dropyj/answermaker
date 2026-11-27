@@ -33,6 +33,10 @@ try {
     platform: "node",
     outfile: bundlePath,
     logLevel: "silent",
+    // transformers 只在 embeddings.ensureModel 里动态 import，反馈自查不走语义
+    // 通道；标 external 避免 esbuild 内联 onnxruntime-node 的 .node 原生文件
+    // （在打包环境会报 No loader is configured for ".node" files）。
+    external: ["@xenova/transformers"],
   });
   const M = await import(pathToFileURL(bundlePath).href);
   const { initChunks, bm25Search, initFeedback, setExplicitFeedback, listFeedback } = M;

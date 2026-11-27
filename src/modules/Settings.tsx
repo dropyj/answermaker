@@ -14,65 +14,7 @@ const fmtTime = (iso?: string | null) => {
 import SyncPanel, { type SyncData } from "./SyncPanel";
 import AccountsPanel from "./AccountsPanel";
 import FeedbackPanel from "./FeedbackPanel";
-import {
-  backfillVectors, loadSemanticSettings, semanticStatus, semanticStatusError, setSemanticEnabled,
-  vectorCount, SEMANTIC_MODEL,
-} from "../embeddings";
-import { allChunks } from "../search";
-
-/** 语义检索（项3，实验）：本地 embedding 与 BM25 混合检索的开关与状态。 */
-function SemanticPanel() {
-  const [enabled, setEnabled] = useState(() => loadSemanticSettings().enabled);
-  const [status, setStatus] = useState(semanticStatus());
-  const [count, setCount] = useState(vectorCount());
-  const [note, setNote] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    const refresh = () => { setStatus(semanticStatus()); setCount(vectorCount()); setEnabled(loadSemanticSettings().enabled); };
-    window.addEventListener("am:semantic-changed", refresh);
-    return () => window.removeEventListener("am:semantic-changed", refresh);
-  }, []);
-
-  const toggle = async (on: boolean) => {
-    setBusy(true);
-    setNote(on ? "正在加载模型（首次需下载约 100MB，之后纯本地运行）…" : "");
-    try {
-      await setSemanticEnabled(on);
-      setEnabled(on);
-      if (on) {
-        const all = allChunks();
-        const r = await backfillVectors(all, (done, total) => setNote(`正在为已有文档生成向量：${done}/${total} 个切块…`));
-        setNote(r.indexed > 0 ? `模型就绪，已为 ${r.indexed} 个切块生成向量（共 ${r.total} 个）。` : "模型就绪，全部切块都已有向量。");
-      } else {
-        setNote("已关闭语义检索，检索回到纯 BM25（已生成的向量保留，重新开启不用再生成）。");
-      }
-    } catch (e) {
-      setNote(`模型加载失败：${e instanceof Error ? e.message : String(e)}。开关已打开，网络恢复后重新开关一次即可重试；失败期间检索自动降级为纯 BM25。`);
-    } finally { setBusy(false); }
-  };
-
-  return (
-    <div className="card">
-      <h3>语义检索（实验）</h3>
-      <p className="hint">
-        在 BM25 之上叠加本地向量通道（模型 {SEMANTIC_MODEL}，512 维）：换个说法也能召回语义相近的片段，
-        混合分作为基础分继续走召回反馈层。首次开启需下载约 100MB 模型文件，之后<strong>纯本地运行</strong>，不联网、不上传。
-        关闭或模型未就绪时行为与纯 BM25 完全一致。
-      </p>
-      <div className="row">
-        <label>
-          <input type="checkbox" checked={enabled} disabled={busy} onChange={(e) => void toggle(e.target.checked)} /> 启用语义检索
-        </label>
-        <span className="dim">
-          状态：{status === "ready" ? "模型就绪" : status === "loading" ? "模型加载中…" : status === "error" ? `加载失败（${semanticStatusError()}）` : enabled ? "已开启，模型待加载" : "未开启"}
-          {" "}· 已索引向量 {count} 条
-        </span>
-      </div>
-      {note && <p className="notice">{note}</p>}
-    </div>
-  );
-}
+import ModelManagerPanel from "./ModelManager";
 import type { Account, FileEntry, KnowledgeDoc } from "../types";
 import type { Dispatch, SetStateAction } from "react";
 import type { SyncPayload } from "../sync";
@@ -292,7 +234,7 @@ export default function Settings({ syncData, onSyncMerge, accountsData, feedback
       {accountsData && <AccountsPanel {...accountsData} />}
       {syncData && onSyncMerge && <SyncPanel data={syncData} onMerge={onSyncMerge} />}
       <FeedbackPanel docs={feedbackDocs ?? accountsData?.docs ?? []} />
-      <SemanticPanel />
+      <ModelManagerPanel />
 
       <h3>在线内容登录（POPO / KM）</h3>
       <p className="hint">

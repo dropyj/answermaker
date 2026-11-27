@@ -407,6 +407,15 @@ pub fn db_delete_vectors(state: tauri::State<'_, DbState>, doc_id: String) -> Re
     Ok(())
 }
 
+/// 清空全部文档向量（模型管理：切换模型后一键重建索引的第一步）。
+#[tauri::command]
+pub fn db_clear_vectors(state: tauri::State<'_, DbState>) -> Result<(), String> {
+    let conn = lock(&state)?;
+    conn.execute("DELETE FROM doc_vectors", [])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 pub fn db_load_all(state: tauri::State<'_, DbState>) -> Result<DbSnapshot, String> {
     let conn = lock(&state)?;
