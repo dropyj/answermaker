@@ -20,7 +20,8 @@ import Mcp from "./modules/Mcp";
 import Settings from "./modules/Settings";
 import OllamaBootstrap from "./modules/OllamaBootstrap";
 import VaultHitCard from "./modules/VaultHitCard";
-import { MODELS, MODES, mockReply, ollamaChat, ragFallbackReply, retrieveAsync, searchReply } from "./modules/Chat";
+import { MODELS, MODES, mockReply, ollamaChatStream, ragFallbackReply, retrieveAsync, searchReply } from "./modules/Chat";
+import { StreamPartialError } from "./streaming";
 import { searchVault } from "./modules/vaultSearch";
 import { searchFiles } from "./files";
 import { tokenize, chunkText, saveChunks } from "./search";
@@ -247,6 +248,7 @@ export default function App() {
   const [mode, setMode] = useState<ChatMode>("chat");
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const [streamActive, setStreamActive] = useState(false); // 流式生成中：占位消息即进度，不再另显等待气泡
   const [messages, setMessages] = useState<ChatMessage[]>([
     { role: "assistant", kind: "chat", text: "欢迎使用 AnswerMaker。可直接聊天，或检索知识库与保险库。" },
   ]);
@@ -618,36 +620,65 @@ export default function App() {
       return;
     }
 
-    // 本地 Ollama
+    // 本地 Ollama（流式：先插入占位消息，token 增量节流刷新）
     if (model === "ollama") {
       setSending(true);
+      setStreamActive(true);
+      const extras = {
+        systemHits: systemHits.length ? systemHits : undefined,
+        hits: hits.length ? hits : undefined,
+        vaultHits: vaultHits.length ? vaultHits : undefined,
+        fileHits: fileHits.length ? fileHits : undefined,
+        vaultLocked: vaultLocked || undefined,
+        sources: sources.length ? sources : undefined,
+      };
+      setMessages([...history, { role: "assistant", kind: mode, text: "", ...extras }]);
+      let acc = "";
+      let lastFlush = 0;
+      let flushTimer: number | undefined;
+      const renderPartial = () => {
+        setMessages([...history, { role: "assistant", kind: mode, text: acc, ...extras }]);
+      };
       try {
-        const text = await ollamaChat(ollamaModel, history, context || undefined);
-        setMessages([...history, {
-          role: "assistant", kind: mode, text,
-          systemHits: systemHits.length ? systemHits : undefined,
-          hits: hits.length ? hits : undefined,
-          vaultHits: vaultHits.length ? vaultHits : undefined,
-          fileHits: fileHits.length ? fileHits : undefined,
-          vaultLocked: vaultLocked || undefined,
-          sources: sources.length ? sources : undefined,
-        }]);
-      } catch {
-        const fallback = hits.length
-          ? ragFallbackReply(q, docs)
-          : vaultHits.length
-            ? { role: "assistant" as const, kind: "chat" as const, text: `保险库匹配到 ${vaultHits.length} 条，已在下方卡片展示，可直接复制密码或 JSON。` }
-            : mockReply("chat", model, q, docs);
-        setMessages([...history, {
-          ...fallback,
-          kind: "chat",
-          systemHits: systemHits.length ? systemHits : undefined,
-          vaultHits: vaultHits.length ? vaultHits : undefined,
-          fileHits: fileHits.length ? fileHits : undefined,
-          vaultLocked: vaultLocked || undefined,
-          text: `⚠ Ollama 未连接或模型未就绪，以下为本地结果。\n\n${fallback.text}`,
-        }]);
-      } finally { setSending(false); }
+        const text = await ollamaChatStream(ollamaModel, history, context || undefined, (delta) => {
+          acc += delta;
+          const now = Date.now();
+          if (now - lastFlush >= 50) {
+            lastFlush = now;
+            renderPartial();
+          } else {
+            window.clearTimeout(flushTimer);
+            flushTimer = window.setTimeout(renderPartial, 50);
+          }
+        });
+        window.clearTimeout(flushTimer);
+        setMessages([...history, { role: "assistant", kind: mode, text, ...extras }]);
+      } catch (e) {
+        window.clearTimeout(flushTimer);
+        if (e instanceof StreamPartialError && e.partial) {
+          // 流中途中断：保留已生成部分并标注，不走回退（回退会丢弃真实产出）
+          setMessages([...history, {
+            role: "assistant", kind: mode, ...extras,
+            text: `${e.partial}\n\n（连接中断，已保留部分回复）`,
+          }]);
+        } else {
+          // 流开始前失败：走原有非流式/本地回退路径，标注不变
+          const fallback = hits.length
+            ? ragFallbackReply(q, docs)
+            : vaultHits.length
+              ? { role: "assistant" as const, kind: "chat" as const, text: `保险库匹配到 ${vaultHits.length} 条，已在下方卡片展示，可直接复制密码或 JSON。` }
+              : mockReply("chat", model, q, docs);
+          setMessages([...history, {
+            ...fallback,
+            kind: "chat",
+            systemHits: systemHits.length ? systemHits : undefined,
+            vaultHits: vaultHits.length ? vaultHits : undefined,
+            fileHits: fileHits.length ? fileHits : undefined,
+            vaultLocked: vaultLocked || undefined,
+            text: `⚠ Ollama 未连接或模型未就绪，以下为本地结果。\n\n${fallback.text}`,
+          }]);
+        }
+      } finally { setSending(false); setStreamActive(false); }
       return;
     }
 
@@ -767,7 +798,7 @@ export default function App() {
                     )}
                   </div>
                 ))}
-                {sending && <div className="msg assistant"><div>{loadingLabel}</div></div>}
+                {sending && !streamActive && <div className="msg assistant"><div>{loadingLabel}</div></div>}
               </div>
 
               <div className="composer">

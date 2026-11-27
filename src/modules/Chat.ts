@@ -1,6 +1,7 @@
 import type { ChatMessage, ChatMode, FileEntry, KnowledgeDoc, ModelId, SearchHit, SystemEntry, VaultHit } from "../types";
 import { bm25Search, searchKnowledge } from "../search";
 import { OLLAMA_BASE } from "../ollamaModels";
+import { NdjsonParser, StreamPartialError, ollamaStreamEvent } from "../streaming";
 
 export const MODELS: { id: ModelId; label: string }[] = [
   { id: "ollama", label: "Ollama 本地" },
@@ -99,11 +100,8 @@ if (mode === "rag") return ragFallbackReply(q, docs);
 return { role: "assistant", kind: mode, text: `收到：「${q}」。${modelLabel} 在本地模拟模式下不调用真实模型；请选择 Ollama 或本地 Agent CLI 获得真实回复。`};
 }
 
-/** 真实请求本机 Ollama /api/chat（非流式）。失败抛错，由调用方回退并标注。 */
-export async function ollamaChat(modelName: string, history: ChatMessage[], context?: string): Promise<string> {
-const ctrl = new AbortController();
-const timer = setTimeout(() => ctrl.abort(), 30_000);
-try {
+/** 组装 Ollama /api/chat 的 messages：context 作为一条 user 消息插在最后一条用户消息之前。 */
+function buildOllamaMessages(history: ChatMessage[], context?: string) {
 const messages = history.map((m) => ({ role: m.role, content: m.text}));
 if (context) {
 messages.splice(messages.length - 1, 0, {
@@ -111,10 +109,18 @@ role: "user",
 content: `以下为从本地知识库检索到的真实片段，请优先依据这些片段回答，并注明来源文档名：\n${context}`,
 });
 }
+return messages;
+}
+
+/** 真实请求本机 Ollama /api/chat（非流式）。失败抛错，由调用方回退并标注。 */
+export async function ollamaChat(modelName: string, history: ChatMessage[], context?: string): Promise<string> {
+const ctrl = new AbortController();
+const timer = setTimeout(() => ctrl.abort(), 30_000);
+try {
 const res = await fetch(`${OLLAMA_BASE}/api/chat`, {
 method: "POST",
 headers: { "Content-Type": "application/json"},
-body: JSON.stringify({ model: modelName || "qwen2.5:3b", messages, stream: false }),
+body: JSON.stringify({ model: modelName || "qwen2.5:3b", messages: buildOllamaMessages(history, context), stream: false }),
 signal: ctrl.signal,
 });
 if (!res.ok) throw new Error(`Ollama HTTP ${res.status}`);
@@ -123,4 +129,54 @@ const text = data.message?.content?.trim();
 if (!text) throw new Error("Ollama 返回为空");
 return text;
 } finally { clearTimeout(timer);}
+}
+
+/**
+ * 流式请求本机 Ollama /api/chat：逐 token 回调 onToken（增量文本），返回全文。
+ * - 流开始前失败（HTTP 错误/连接失败）：抛普通 Error，无 partial，调用方走原回退路径；
+ * - 流中途失败（断连/服务端 error 事件）：已产出内容时抛 StreamPartialError
+ *   （携带 partial），调用方保留部分回复并标注；尚无产出时抛普通 Error。
+ */
+export async function ollamaChatStream(
+modelName: string,
+history: ChatMessage[],
+context: string | undefined,
+onToken: (delta: string) => void,
+): Promise<string> {
+const ctrl = new AbortController();
+const timer = setTimeout(() => ctrl.abort(), 300_000); // 流式整体上限 5 分钟（非流式为 30 秒）
+let acc = "";
+try {
+const res = await fetch(`${OLLAMA_BASE}/api/chat`, {
+method: "POST",
+headers: { "Content-Type": "application/json"},
+body: JSON.stringify({ model: modelName || "qwen2.5:3b", messages: buildOllamaMessages(history, context), stream: true }),
+signal: ctrl.signal,
+});
+if (!res.ok) throw new Error(`Ollama HTTP ${res.status}`);
+if (!res.body) throw new Error("Ollama 流式响应无数据流");
+const reader = res.body.getReader();
+const decoder = new TextDecoder();
+const parser = new NdjsonParser();
+const handleEvents = (events: Record<string, unknown>[]) => {
+for (const ev of events) {
+const { content, error } = ollamaStreamEvent(ev);
+if (error) throw new Error(`Ollama 流式错误：${error}`);
+if (content) { acc += content; onToken(content); }
+}
+};
+for (;;) {
+const { done, value } = await reader.read();
+if (done) break;
+handleEvents(parser.push(decoder.decode(value, { stream: true })));
+}
+handleEvents(parser.end());
+} catch (e) {
+if (acc) {
+throw new StreamPartialError(acc, e instanceof Error ? e.message : String(e));
+}
+throw e;
+} finally { clearTimeout(timer);}
+if (!acc.trim()) throw new Error("Ollama 返回为空");
+return acc;
 }
