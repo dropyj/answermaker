@@ -394,7 +394,8 @@ fn status_impl() -> Result<McpStatus, String> {
         // 本机模式下端点给 127.0.0.1，局域网模式才给局域网 IP（与服务端实际绑定一致）。
         endpoint: format!(
             "http://{}:{}/mcp",
-            if lan { ip.clone() } else { "127.0.0.1".to_string() }
+            if lan { ip.clone() } else { "127.0.0.1".to_string() },
+            port
         ),
         lan_ip: ip,
         bind,
@@ -1158,15 +1159,17 @@ mod tests {
 // server 把 notes_add/todos_add/events_add 等写请求落成 ingest-requests/<id>.json，
 // 应用轮询 mcp_ingest_pending 导入落库（SQLite），再 mcp_ingest_ack 删除队列文件，形成真实闭环。
 
-fn ingest_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = data_dir_for(app)?.join("ingest-requests");
+fn ingest_dir() -> Result<PathBuf, String> {
+    // 与 start_impl 启动服务端时的数据目录保持同一份：服务端把写请求落到
+    // ANSWERMAKER_DATA_DIR/ingest-requests，应用轮询导入后再 ack 删除。
+    let dir = data_dir_for(find_server().as_deref()).join("ingest-requests");
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir)
 }
 
 #[tauri::command]
-pub fn mcp_ingest_pending(app: AppHandle) -> Result<Vec<Value>, String> {
-    let dir = ingest_dir(&app)?;
+pub fn mcp_ingest_pending() -> Result<Vec<Value>, String> {
+    let dir = ingest_dir()?;
     let mut out = Vec::new();
     if let Ok(rd) = fs::read_dir(&dir) {
         for entry in rd.flatten() {
@@ -1185,8 +1188,8 @@ pub fn mcp_ingest_pending(app: AppHandle) -> Result<Vec<Value>, String> {
 }
 
 #[tauri::command]
-pub fn mcp_ingest_ack(app: AppHandle, ids: Vec<String>) -> Result<(), String> {
-    let dir = ingest_dir(&app)?;
+pub fn mcp_ingest_ack(ids: Vec<String>) -> Result<(), String> {
+    let dir = ingest_dir()?;
     for id in ids {
         let safe: String = id.chars().filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_').collect();
         if safe.is_empty() {
