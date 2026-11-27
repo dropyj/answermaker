@@ -14,6 +14,7 @@ import {
   DEFAULT_CHAT_MODEL, PullProgressAggregator, getChatModel, setChatModel, tagMatches,
   type PullProgress,
 } from "./chatModels";
+import { loadDownloadSource, ollamaPullName } from "./downloadSource";
 
 export const OLLAMA_BASE = "http://localhost:11434";
 export const OLLAMA_MODELS_EVENT = "am:ollama-models-changed";
@@ -109,10 +110,13 @@ export async function pullModel(tag: string): Promise<void> {
     }
   };
   try {
+    // 仓库前缀（项2，高级设置）：非空时按 <prefix>/<tag> 拉取（私有仓库 /
+    // hf.co 风格路径）；拉到的模型名带前缀，装好后出现在「其他已安装模型」。
+    const pullName = ollamaPullName(tag, loadDownloadSource().ollamaPrefix);
     const res = await fetch(`${OLLAMA_BASE}/api/pull`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: tag, stream: true }),
+      body: JSON.stringify({ name: pullName, stream: true }),
       signal: ctrl.signal,
     });
     if (!res.ok) throw new Error(`Ollama HTTP ${res.status}`);

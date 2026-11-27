@@ -12,6 +12,7 @@ import { CHAT_MODEL_EVENT } from "../chatModels";
 import CollapsibleSection from "../components/CollapsibleSection";
 import { getMachineInfo, type MachineInfo } from "../machineInfo";
 import { assessModelFit } from "../modelFit";
+import { loadDownloadSource, saveDownloadSource } from "../downloadSource";
 
 const fmtBytes = (n?: number) => {
   if (!n || n <= 0) return "—";
@@ -42,6 +43,12 @@ export default function ChatModelManager() {
   const [note, setNote] = useState("");
   const [checking, setChecking] = useState(false);
   const [machine, setMachine] = useState<MachineInfo | null>(null);
+  const [repoPrefix, setRepoPrefix] = useState(() => loadDownloadSource().ollamaPrefix ?? "");
+
+  const updateRepoPrefix = (v: string) => {
+    setRepoPrefix(v);
+    saveDownloadSource({ ...loadDownloadSource(), ollamaPrefix: v.trim() ? v : undefined });
+  };
 
   useEffect(() => {
     void getMachineInfo().then(setMachine).catch(() => {});
@@ -144,6 +151,21 @@ export default function ChatModelManager() {
         ) : "检测中…"}
       </div>
       {note && <p className="notice">{note}</p>}
+
+      <div className="row">
+        <span className="dim">仓库前缀（高级）：</span>
+        <input
+          style={{ flex: 1, minWidth: 220 }}
+          placeholder="留空走 Ollama 官方；私有仓库示例 registry.example.com/myns"
+          value={repoPrefix}
+          onChange={(e) => updateRepoPrefix(e.target.value)}
+        />
+      </div>
+      <p className="hint">
+        Ollama 官方没有公共镜像机制。填了前缀后，下载会按「前缀/模型名」拉取（适用于私有仓库或
+        hf.co 风格路径的兼容仓库）；拉到的模型名带前缀，装好后会出现在下方「其他已安装模型」里选用。
+        不确定就留空。
+      </p>
 
       {!available && service !== "unknown" && (
         <div className="warnbox">

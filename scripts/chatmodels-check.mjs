@@ -30,7 +30,7 @@ function check(name, ok, detail = "") {
 try {
   await build({
     stdin: {
-      contents: 'export * from "./chatModels.ts";',
+      contents: 'export * from "./chatModels.ts";\nexport * from "./downloadSource.ts";',
       resolveDir: join(root, "src"),
       loader: "ts",
       sourcefile: "chatmodels-check-entry.ts",
@@ -136,6 +136,15 @@ try {
     mem.get(CHAT_MODEL_KEY) === "qwen3:8b" && CHAT_MODEL_KEY === "am_chat_model");
   setChatModel("  ", storage);
   check("空 tag 不覆盖已有值", getChatModel(storage) === "qwen3:8b");
+
+  // ---- 4b) Ollama 仓库前缀拼接（项2） ----
+  const { ollamaPullName } = M;
+  check("仓库前缀为空回原 tag",
+    ollamaPullName("qwen2.5:3b") === "qwen2.5:3b" && ollamaPullName("qwen2.5:3b", "  ") === "qwen2.5:3b");
+  check("仓库前缀拼为 <prefix>/<tag> 且去尾随斜杠",
+    ollamaPullName("qwen2.5:3b", "registry.example.com/myns/") === "registry.example.com/myns/qwen2.5:3b");
+  check("仓库前缀支持 hf.co 风格路径",
+    ollamaPullName("qwen2.5:7b", "hf.co/myorg") === "hf.co/myorg/qwen2.5:7b");
 
   // ---- 5) 真实 /api/tags 探测（没有服务则 SKIP） ----
   try {

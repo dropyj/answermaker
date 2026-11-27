@@ -11,6 +11,9 @@ import {
 } from "../modelManager";
 import { allChunks } from "../search";
 import CollapsibleSection from "../components/CollapsibleSection";
+import {
+  loadDownloadSource, saveDownloadSource, type DownloadSourceSettings, type HfSource,
+} from "../downloadSource";
 
 const fmtBytes = (n?: number) => {
   if (!n || n <= 0) return "—";
@@ -39,6 +42,13 @@ export default function ModelManagerPanel() {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [rebuild, setRebuild] = useState<{ done: number; total: number } | null>(null);
+  const [dlSrc, setDlSrc] = useState<DownloadSourceSettings>(() => loadDownloadSource());
+
+  const updateDlSrc = (patch: Partial<DownloadSourceSettings>) => {
+    const next = { ...dlSrc, ...patch };
+    setDlSrc(next);
+    saveDownloadSource(next);
+  };
 
   useEffect(() => {
     const refreshSemantic = () => {
@@ -153,6 +163,32 @@ export default function ModelManagerPanel() {
         </span>
       </div>
       {note && <p className="notice">{note}</p>}
+
+      <div className="row">
+        <span className="dim">下载源：</span>
+        <select
+          value={dlSrc.hf}
+          onChange={(e) => updateDlSrc({ hf: e.target.value as HfSource })}
+          title="语义模型文件的下载地址（transformers.js remoteHost）"
+        >
+          <option value="official">官方（huggingface.co）</option>
+          <option value="mirror">镜像（hf-mirror.com）</option>
+          <option value="custom">自定义</option>
+        </select>
+        {dlSrc.hf === "custom" && (
+          <input
+            style={{ flex: 1, minWidth: 220 }}
+            placeholder="https://your-mirror-host"
+            value={dlSrc.hfCustom ?? ""}
+            onChange={(e) => updateDlSrc({ hfCustom: e.target.value })}
+          />
+        )}
+        <span className="dim">切换只影响后续下载，已缓存的模型不会重复下载。</span>
+      </div>
+      <p className="hint">
+        镜像站是第三方站点（与 HuggingFace 官方无关），只是换了文件下载地址；模型文件的一致性由
+        transformers.js 加载时的校验兜底，本应用不对镜像站的可信度背书——介意请保持官方源。
+      </p>
 
       {indexIncomplete && (
         <div className="warnbox">

@@ -466,7 +466,8 @@ cargo test --manifest-path src-tauri/Cargo.toml   # 含密钥写入单测
 - 取消语义（如实）：transformers.js v2 不支持 AbortSignal，取消 = 置取消标志 + UI 立即回未下载 + 按 URL 含模型 id 尽力清 `transformers-cache` 部分缓存；底层请求可能仍在后台跑完，但迟到的进度/完成一律忽略、结果丢弃，不会改回已下载。
 - 删除：清该模型缓存条目 + 注册表回未下载；删的是当前启用模型时 extractor 丢弃、语义状态回退 `not-downloaded`（开启时）并提示检索已降级纯 BM25。
 - 切换与重建：同一时间只启用一个模型（设置 `am_semantic_settings {enabled, modelId}`，旧格式只有 enabled 时 modelId 缺省回默认）。切换后内存索引按新模型重新过滤（doc_vectors 的 model 字段隔离），新模型向量数 < 全部切块数时模型区顶部出现提示条 + 「一键重建索引」：先 `db_clear_vectors` 清空全部向量（浏览器回退清 localStorage），再用当前模型 backfill 全量重建（带进度）。旧维度向量不会被混用——维度不同余弦无意义，索引不完整期间语义通道只用已有部分、其余走 BM25。
-- 自查：`npm run models:check`（目录完整性/进度聚合数学/状态机/注册表往返 + bge-small 真实 pipeline 加载，25/25 PASS）。
+- 下载源（优化项2）：设置存 `am_download_source { hf, hfCustom?, ollamaPrefix? }`（`src/downloadSource.ts`）。语义侧在 pipeline 加载前（`embeddings.ensureModel` 与 `modelManager.downloadModel` 两处）动态 import 后把 `env.remoteHost` 设为所选源：官方 `https://huggingface.co` / 镜像 `https://hf-mirror.com` / 自定义。切换只影响后续下载，已缓存模型不受影响。镜像为第三方站点（与 HF 官方无关），文件一致性由 transformers.js 加载校验兜底，本应用不对镜像可信度背书，UI 已注明。
+- 自查：`npm run models:check`（目录完整性/进度聚合数学/状态机/注册表往返/下载源映射 + bge-small 真实 pipeline 加载，PASS）。
 
 ## 聊天本地模型管理（Ollama 模型管理区，已落地）
 
@@ -490,7 +491,8 @@ cargo test --manifest-path src-tauri/Cargo.toml   # 含密钥写入单测
 - tag 匹配与 `OllamaBootstrap.hasModel` 同一规则：已安装名等于 tag 或等于 `tag + ":latest"`（反向亦然），目录状态、当前模型判定、删除回退都走这条规则。
 - pull 进度与真取消：`POST /api/pull {stream:true}` 逐行解析 NDJSON，多 digest 按最新 completed/total 汇总不重复计数，percent 历史最大值兜底保证单调不减，带速度/ETA 与状态文案中文化（pulling manifest→正在获取模型清单、verifying→正在校验文件完整性等），约 200ms 节流通知 UI；流中出现 `error` 字段即置下载失败。取消用 AbortController **真中断** fetch（与语义模型的「取消意图」不同）：UI 立即回未下载；Ollama 服务端可能残留部分层，由 Ollama 自行管理、重拉时可续传复用，本应用不额外清理。
 - 当前模型持久化：localStorage `am_chat_model`（默认 `qwen2.5:3b`），`setChatModel` 广播 `am:chat-model-changed`，聊天区监听同步；聊天区工具栏改为已安装模型下拉（来自 /api/tags，含「自定义…」手输项与当前未安装值的提示项，列表拉不到时退回原文本输入）+「管理模型」入口（切到设置页本区）。启动时的硬件推荐值只在用户从未保存过选择时套用（会话内、不落盘），OllamaBootstrap 的就绪回填也不落盘。删除当前聊天模型后自动回退到任一剩余已安装模型（都没有时回默认 qwen2.5:3b）并广播，UI 给提示。`ollamaChat` 调用与失败模拟回退逻辑不变。
-- 自查：`npm run chatmodels:check`（目录完整性/进度聚合数学/tag 匹配/持久化往返，24/24 PASS；本机无 Ollama 时真实 /api/tags 探测 SKIP 不算失败）。
+- 仓库前缀（优化项2，高级）：Ollama 官方没有公共镜像机制，不虚构镜像地址。设置 `am_download_source.ollamaPrefix` 非空时，pull 的模型名拼为 `<prefix>/<tag>`（私有仓库 / hf.co 风格路径的兼容仓库），状态仍按目录 tag 跟踪；带前缀拉到的模型名不与目录 tag 匹配，会出现在「其他已安装模型」里选用/删除。ChatModelManager 顶部有输入框与如实说明，默认留空走官方。
+- 自查：`npm run chatmodels:check`（目录完整性/进度聚合数学/tag 匹配/持久化往返/仓库前缀拼接，PASS；本机无 Ollama 时真实 /api/tags 探测 SKIP 不算失败）。
 - 机器适配比对（`src/machineInfo.ts` + `src/modelFit.ts`）：每张目录卡片按本机配置给出 ✓适合 / ⚠勉强 / ✗不建议 徽标与原因行（内存/磁盘/GPU/速度各一行，含本机数值与要求数值对比），区域顶部有一行「本机配置」摘要。机器信息来源：桌面端 Rust `machine_info` 命令——内存/显存/GPU 名复用 `ollama.rs` 与 `ollama_status` 相同的 `hardware()` 探测口径（CIM 内存、CIM GPU 名、nvidia-smi 显存），另加 CIM CPU 物理核数/名称与模型目录所在盘剩余空间（DriveInfo / df）；浏览器预览回退为 `hardwareConcurrency`、`deviceMemory`（Chrome 上限 8，近似值）、WebGL renderer GPU 名，显存/磁盘为 null，UI 明示「浏览器环境下为近似值」。判定口径（`assessModelFit` 纯函数）：以目录 `ramGB`/`sizeGB` 为基准——内存 ≥ ramGB 过关；≥ sizeGB×1.3（最低线）但 < ramGB 为 tight；低于最低线为 no；freeDiskGB 已知且 < sizeGB 直接 no；检测到显存 ≥ sizeGB 标「可 GPU 加速」，否则按 CPU 推理按参数量分档给 tok/s 经验预估（文案明示经验值）；内存未知时整体封顶 tight。限制如实：显存只探测 NVIDIA 独显（nvidia-smi），AMD/Intel 独显与核显共享内存场景无法给出显存数、按 CPU 估算；「其他已安装模型」不在目录内、缺 ramGB 基准，不做判定、只注明体积。自查：`npm run fit:check`（三档假机器 × 多模型判定矩阵 + 磁盘不足/未检测到兜底）。
 
 

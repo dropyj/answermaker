@@ -29,7 +29,7 @@ function check(name, ok, detail = "") {
 try {
   await build({
     stdin: {
-      contents: 'export * from "./models.ts";',
+      contents: 'export * from "./models.ts";\nexport * from "./downloadSource.ts";',
       resolveDir: join(root, "src"),
       loader: "ts",
       sourcefile: "models-check-entry.ts",
@@ -118,6 +118,24 @@ try {
   check("downloading 状态重启后按中断回未下载",
     parseRegistry(JSON.stringify({ x: { status: "downloading" } })).x.status === "not-downloaded");
   check("注册表键名固定", MODEL_REGISTRY_KEY === "am_model_registry");
+
+  // ---- 4b) 下载源（项2）：remoteHost 映射与设置往返 ----
+  const {
+    hfRemoteHost, parseDownloadSource, loadDownloadSource, saveDownloadSource,
+    DOWNLOAD_SOURCE_KEY, HF_OFFICIAL_HOST, HF_MIRROR_HOST,
+  } = M;
+  check("下载源 official → huggingface.co", hfRemoteHost({ hf: "official" }) === HF_OFFICIAL_HOST);
+  check("下载源 mirror → hf-mirror.com", hfRemoteHost({ hf: "mirror" }) === HF_MIRROR_HOST);
+  check("下载源 custom 用自定义地址且去尾随斜杠",
+    hfRemoteHost({ hf: "custom", hfCustom: "https://mirror.example.com/" }) === "https://mirror.example.com");
+  check("下载源 custom 为空回官方", hfRemoteHost({ hf: "custom", hfCustom: "  " }) === HF_OFFICIAL_HOST);
+  check("下载源坏数据回默认官方", parseDownloadSource("{oops").hf === "official" &&
+    parseDownloadSource(JSON.stringify({ hf: "weird" })).hf === "official");
+  saveDownloadSource({ hf: "mirror", ollamaPrefix: "reg.example.com/ns" }, storage);
+  const dlBack = loadDownloadSource(storage);
+  check("下载源设置往返一致且键名固定",
+    dlBack.hf === "mirror" && dlBack.ollamaPrefix === "reg.example.com/ns" &&
+    mem.get(DOWNLOAD_SOURCE_KEY)?.includes("mirror") && DOWNLOAD_SOURCE_KEY === "am_download_source");
 
   // ---- 5) 真实小下载/加载（走缓存；不可用则 SKIP） ----
   try {

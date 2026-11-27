@@ -28,6 +28,7 @@ import { saveVectors, deleteVectors, clearAllVectors, type DocVector} from "./db
 import {
 DEFAULT_MODEL_ID, getModelInfo, isDownloaded, isKnownModel, type EmbeddingModelInfo,
 } from "./models";
+import { hfRemoteHost, loadDownloadSource } from "./downloadSource";
 
 const SETTINGS_KEY = "am_semantic_settings";
 export const VEC_RECALL_THRESHOLD = 0.35;
@@ -138,7 +139,10 @@ throw new Error("模型尚未下载，请先在设置页「本地模型」区手
 }
 setStatus("loading");
 loadPromise = (async () => {
-const { pipeline} = await import("@xenova/transformers");
+const { pipeline, env } = await import("@xenova/transformers");
+// 下载源（项2）：加载前按设置指定 remoteHost（官方/镜像/自定义）；
+// 只影响之后的文件请求，已缓存模型不受影响。
+env.remoteHost = hfRemoteHost(loadDownloadSource());
 const ex = (await pipeline("feature-extraction", modelId, { quantized: true})) as unknown as Extractor;
 extractor = ex;
 extractorModelId = modelId;

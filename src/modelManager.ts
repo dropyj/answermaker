@@ -20,6 +20,7 @@ import {
   type DownloadProgress, type ModelRegistry, type ModelRegistryEntry,
 } from "./models";
 import { activeModelId, handleActiveModelRemoved, reloadActiveModel } from "./embeddings";
+import { hfRemoteHost, loadDownloadSource } from "./downloadSource";
 
 export const MODEL_EVENT = "am:model-changed";
 
@@ -78,7 +79,9 @@ export async function downloadModel(id: string): Promise<void> {
     }
   };
   try {
-    const { pipeline } = await import("@xenova/transformers");
+    const { pipeline, env } = await import("@xenova/transformers");
+    // 下载源（项2）：与 embeddings.ensureModel 同一口径，下载前设置 remoteHost。
+    env.remoteHost = hfRemoteHost(loadDownloadSource());
     await pipeline("feature-extraction", id, { quantized: true, progress_callback: onProgress });
     if (token.cancelled) return; // 取消后的迟到完成：结果丢弃
     progressMap.delete(id);
