@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import type { Dispatch, ReactNode, SetStateAction } from "react";
 import Vault from "./modules/Vault";
 import Knowledge from "./modules/Knowledge";
 import Files from "./modules/Files";
@@ -22,6 +22,7 @@ import OllamaBootstrap from "./modules/OllamaBootstrap";
 import VaultHitCard from "./modules/VaultHitCard";
 import { MODELS, MODES, mockReply, ollamaChatStream, ragFallbackReply, retrieveAsync, searchReply } from "./modules/Chat";
 import { StreamPartialError } from "./streaming";
+import { resolveApiKey, streamApiChat, type ApiProviderId } from "./apiProviders";
 import { searchVault } from "./modules/vaultSearch";
 import { searchFiles } from "./files";
 import { tokenize, chunkText, saveChunks } from "./search";
@@ -52,6 +53,46 @@ const NAV: { id: Section; label: string; icon: string }[] = [
 ];
 
 const KIND_LABEL: Record<ChatMode, string> = { chat: "聊天", rag: "RAG", search: "搜索" };
+
+/**
+ * 流式生成共用渲染（Ollama 与在线 API 同一机制）：先插入空占位消息，
+ * token 增量按 ~50ms 节流刷新该消息；流中途中断时保留已生成部分并在尾部
+ * 标注后正常返回；流开始前失败则抛错，由调用方走各自的回退路径。
+ */
+async function streamAssistant(
+  setMessages: Dispatch<SetStateAction<ChatMessage[]>>,
+  history: ChatMessage[],
+  template: ChatMessage,
+  run: (onToken: (delta: string) => void) => Promise<string>,
+): Promise<void> {
+  setMessages([...history, { ...template, text: "" }]);
+  let acc = "";
+  let lastFlush = 0;
+  let flushTimer: number | undefined;
+  const renderPartial = () => setMessages([...history, { ...template, text: acc }]);
+  try {
+    const text = await run((delta) => {
+      acc += delta;
+      const now = Date.now();
+      if (now - lastFlush >= 50) {
+        lastFlush = now;
+        renderPartial();
+      } else {
+        window.clearTimeout(flushTimer);
+        flushTimer = window.setTimeout(renderPartial, 50);
+      }
+    });
+    window.clearTimeout(flushTimer);
+    setMessages([...history, { ...template, text }]);
+  } catch (e) {
+    window.clearTimeout(flushTimer);
+    if (e instanceof StreamPartialError && e.partial) {
+      setMessages([...history, { ...template, text: `${e.partial}\n\n（连接中断，已保留部分回复）` }]);
+      return;
+    }
+    throw e;
+  }
+}
 
 /**
  * 兼容旧数据（V0.1 / 早期在线读取）：
@@ -620,11 +661,12 @@ export default function App() {
       return;
     }
 
-    // 本地 Ollama（流式：先插入占位消息，token 增量节流刷新）
+    // 本地 Ollama（流式：共用 streamAssistant 增量渲染）
     if (model === "ollama") {
       setSending(true);
       setStreamActive(true);
-      const extras = {
+      const template: ChatMessage = {
+        role: "assistant", kind: mode, text: "",
         systemHits: systemHits.length ? systemHits : undefined,
         hits: hits.length ? hits : undefined,
         vaultHits: vaultHits.length ? vaultHits : undefined,
@@ -632,70 +674,85 @@ export default function App() {
         vaultLocked: vaultLocked || undefined,
         sources: sources.length ? sources : undefined,
       };
-      setMessages([...history, { role: "assistant", kind: mode, text: "", ...extras }]);
-      let acc = "";
-      let lastFlush = 0;
-      let flushTimer: number | undefined;
-      const renderPartial = () => {
-        setMessages([...history, { role: "assistant", kind: mode, text: acc, ...extras }]);
-      };
       try {
-        const text = await ollamaChatStream(ollamaModel, history, context || undefined, (delta) => {
-          acc += delta;
-          const now = Date.now();
-          if (now - lastFlush >= 50) {
-            lastFlush = now;
-            renderPartial();
-          } else {
-            window.clearTimeout(flushTimer);
-            flushTimer = window.setTimeout(renderPartial, 50);
-          }
-        });
-        window.clearTimeout(flushTimer);
-        setMessages([...history, { role: "assistant", kind: mode, text, ...extras }]);
-      } catch (e) {
-        window.clearTimeout(flushTimer);
-        if (e instanceof StreamPartialError && e.partial) {
-          // 流中途中断：保留已生成部分并标注，不走回退（回退会丢弃真实产出）
-          setMessages([...history, {
-            role: "assistant", kind: mode, ...extras,
-            text: `${e.partial}\n\n（连接中断，已保留部分回复）`,
-          }]);
-        } else {
-          // 流开始前失败：走原有非流式/本地回退路径，标注不变
-          const fallback = hits.length
-            ? ragFallbackReply(q, docs)
-            : vaultHits.length
-              ? { role: "assistant" as const, kind: "chat" as const, text: `保险库匹配到 ${vaultHits.length} 条，已在下方卡片展示，可直接复制密码或 JSON。` }
-              : mockReply("chat", model, q, docs);
-          setMessages([...history, {
-            ...fallback,
-            kind: "chat",
-            systemHits: systemHits.length ? systemHits : undefined,
-            vaultHits: vaultHits.length ? vaultHits : undefined,
-            fileHits: fileHits.length ? fileHits : undefined,
-            vaultLocked: vaultLocked || undefined,
-            text: `⚠ Ollama 未连接或模型未就绪，以下为本地结果。\n\n${fallback.text}`,
-          }]);
-        }
+        await streamAssistant(setMessages, history, template, (onToken) =>
+          ollamaChatStream(ollamaModel, history, context || undefined, onToken));
+      } catch {
+        // 流开始前失败：走原有非流式/本地回退路径，标注不变
+        const fallback = hits.length
+          ? ragFallbackReply(q, docs)
+          : vaultHits.length
+            ? { role: "assistant" as const, kind: "chat" as const, text: `保险库匹配到 ${vaultHits.length} 条，已在下方卡片展示，可直接复制密码或 JSON。` }
+            : mockReply("chat", model, q, docs);
+        setMessages([...history, {
+          ...fallback,
+          kind: "chat",
+          systemHits: systemHits.length ? systemHits : undefined,
+          vaultHits: vaultHits.length ? vaultHits : undefined,
+          fileHits: fileHits.length ? fileHits : undefined,
+          vaultLocked: vaultLocked || undefined,
+          text: `⚠ Ollama 未连接或模型未就绪，以下为本地结果。\n\n${fallback.text}`,
+        }]);
       } finally { setSending(false); setStreamActive(false); }
       return;
     }
 
-    // OpenAI / Claude 目前为本地模拟：命中知识库时直接给摘录式 RAG 回答
+    // OpenAI / Claude（项5）：已配置 API Key 时真实流式调用；
+    // 未配置 / 保险库锁定读不到 / 请求失败时回退本地模拟并在消息上如实标注。
     const fallback = hits.length
       ? ragFallbackReply(q, docs)
       : vaultHits.length
         ? { role: "assistant" as const, kind: "chat" as const, text: `保险库匹配到 ${vaultHits.length} 条，已在下方卡片展示，可直接复制密码或 JSON。` }
         : mockReply("chat", model, q, docs);
-    setMessages([...history, {
-      ...fallback,
-      kind: "chat",
+    const fallbackExtras = {
       systemHits: systemHits.length ? systemHits : undefined,
       vaultHits: vaultHits.length ? vaultHits : undefined,
       fileHits: fileHits.length ? fileHits : undefined,
       vaultLocked: vaultLocked || undefined,
-    }]);
+    };
+    const provider = model as ApiProviderId;
+    let apiKey: string | null = null;
+    let keyNote = "";
+    try {
+      const resolved = await resolveApiKey(provider);
+      apiKey = resolved.key;
+      if (!apiKey) {
+        keyNote = resolved.source === "vault" && resolved.vaultLocked
+          ? "API Key 已存入保险库，但保险库已锁定，当前为模拟回复（解锁保险库后可用）。"
+          : "未配置 API Key，当前为模拟回复（到「设置 → 在线模型 API」配置后真实调用）。";
+      }
+    } catch (e) {
+      keyNote = `API Key 读取失败（${e instanceof Error ? e.message : String(e)}），已回退模拟。`;
+    }
+    if (!apiKey) {
+      setMessages([...history, {
+        ...fallback,
+        kind: "chat",
+        ...fallbackExtras,
+        text: `${keyNote}\n\n${fallback.text}`,
+      }]);
+      return;
+    }
+    setSending(true);
+    setStreamActive(true);
+    const template: ChatMessage = {
+      role: "assistant", kind: mode, text: "",
+      hits: hits.length ? hits : undefined,
+      sources: sources.length ? sources : undefined,
+      ...fallbackExtras,
+    };
+    try {
+      await streamAssistant(setMessages, history, template, (onToken) =>
+        streamApiChat(provider, apiKey as string, history, context || undefined, onToken));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setMessages([...history, {
+        ...fallback,
+        kind: "chat",
+        ...fallbackExtras,
+        text: `请求失败（${msg}），已回退模拟。\n\n${fallback.text}`,
+      }]);
+    } finally { setSending(false); setStreamActive(false); }
   };
 
   const lastUserQuery = (beforeIdx: number) => {
@@ -880,7 +937,7 @@ export default function App() {
                   </div>
                 )}
                 {(model === "openai" || model === "claude") && (
-                  <div className="composer-note">OpenAI / Claude 当前为本地模拟回复。</div>
+                  <div className="composer-note">OpenAI / Claude：在「设置 → 在线模型 API」配置 Key 后真实流式调用；未配置或失败时回退模拟并标注。</div>
                 )}
               </div>
             </div>

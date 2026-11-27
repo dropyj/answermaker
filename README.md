@@ -380,7 +380,7 @@ popo-cli auth login     # 浏览器 OpenID 登录（CLI 自动打开浏览器）
 - **在线文档**：KM / POPO 文档已经 popo-cli 真实读取并按链接手动入库；其他域名仍仅登记（受 CORS/鉴权限制）；内容/权限/删除的自动同步（ETag/版本校验）未实现
 - **云端向量库**：仅预留接口，界面标注「待开发」，不实现、不上传
 - **Embedding/向量检索**：当前检索为 BM25 关键词检索；bge-m3 + LanceDB 混合检索为桌面端规划
-- **聊天 OpenAI/Claude**：模型下拉里的 OpenAI / Claude 仍是本地模拟；要接真实 Claude 请选「本地 Agent CLI → Claude Code」
+- **聊天 OpenAI/Claude**：已接真实 API（设置 →「在线模型 API」填 Key 后流式调用，Key 优先存保险库、否则明文存本机并红字提示）；未配置/失败时回退本地模拟并在消息上标注。**尚未用真实 Key 联调**，填入后请先小量实测
 - **Ollama / Agent 限制**：Ollama 首次自动安装依赖 winget/brew 与网络，模型下载体积较大；本地 Agent 为非流式调用（最长 240 秒），不展示逐 token 输出
 - **保险库检索**：密码明文检索需要先解锁；锁定状态只检索 key/type/url 元数据。保险库「匹配识别」的真实文件扫描仍为模拟候选
 

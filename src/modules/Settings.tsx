@@ -16,6 +16,7 @@ import AccountsPanel from "./AccountsPanel";
 import FeedbackPanel from "./FeedbackPanel";
 import ModelManagerPanel from "./ModelManager";
 import ChatModelManager from "./ChatModelManager";
+import ApiProvidersPanel from "./ApiProvidersPanel";
 import CollapsibleSection from "../components/CollapsibleSection";
 import type { Account, FileEntry, KnowledgeDoc } from "../types";
 import type { Dispatch, SetStateAction } from "react";
@@ -244,6 +245,7 @@ export default function Settings({ syncData, onSyncMerge, accountsData, feedback
       <FeedbackPanel docs={feedbackDocs ?? accountsData?.docs ?? []} />
       <ModelManagerPanel />
       <ChatModelManager />
+      <ApiProvidersPanel />
 
       <h3>在线内容登录（POPO / KM）</h3>
       <p className="hint">
@@ -349,7 +351,7 @@ export default function Settings({ syncData, onSyncMerge, accountsData, feedback
         </li>
         <li className="card">知识库：文本切块 + 本地 BM25；KM/POPO 经 popo-cli 读取；文档与切块存 SQLite。</li>
         <li className="card">MCP 网关：Node 服务端与 CLI 可用，默认端口 7361，Token 鉴权。</li>
-        <li className="card">聊天：Ollama 与本地 Agent CLI 已可用；OpenAI / Claude 仍为模拟。</li>
+        <li className="card">聊天：Ollama 与本地 Agent CLI 已可用；OpenAI / Claude 已接真实 API（在上方「在线模型 API」配置 Key 后流式调用，Key 优先存保险库；未配置/失败时回退模拟并标注）。</li>
         <li className="card">审计日志：只记录条目 ID / 工具 / 时间，不记录明文</li>
         <li className="card">版本：AnswerMaker V0.2 · PRD 基线 V1.1（已冻结）</li>
       </ul>

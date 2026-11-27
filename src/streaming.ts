@@ -68,3 +68,94 @@ export function ollamaStreamEvent(ev: Record<string, unknown>): {
   const error = typeof ev.error === "string" && ev.error ? ev.error : null;
   return { content, done: ev.done === true, error };
 }
+
+// ---- SSE（Server-Sent Events）：OpenAI / Anthropic 流式响应 ----
+
+/**
+ * SSE 解析器：push 文本块，按空行切分事件，把每个事件的 data: 行拼起来
+ * 回调（多行 data 以 \n 连接）。event:/id:/注释行忽略。跨 chunk 半行与
+ * 半个事件都由内部缓冲处理；end() 冲刷最后一个无空行结尾的事件。
+ */
+export class SseParser {
+  private buf = "";
+  private dataLines: string[] = [];
+
+  constructor(private onData: (data: string) => void) {}
+
+  push(chunk: string): void {
+    this.buf += chunk;
+    let idx: number;
+    while ((idx = this.buf.indexOf("\n")) >= 0) {
+      const raw = this.buf.slice(0, idx);
+      this.buf = this.buf.slice(idx + 1);
+      this.handleLine(raw.replace(/\r$/, ""));
+    }
+  }
+
+  end(): void {
+    if (this.buf) {
+      this.handleLine(this.buf.replace(/\r$/, ""));
+      this.buf = "";
+    }
+    this.flush();
+  }
+
+  private handleLine(line: string) {
+    if (line === "") {
+      this.flush();
+      return;
+    }
+    if (line.startsWith("data:")) {
+      this.dataLines.push(line.slice(5).replace(/^ /, ""));
+    }
+    // 其余（event: / id: / retry: / : 注释）不影响正文抽取，忽略
+  }
+
+  private flush() {
+    if (this.dataLines.length === 0) return;
+    const data = this.dataLines.join("\n");
+    this.dataLines = [];
+    this.onData(data);
+  }
+}
+
+/** 从一条 SSE data 里抽错误信息（OpenAI 与 Anthropic 的 error 形状都兼容）；无错误回 null。 */
+export function sseErrorMessage(data: string): string | null {
+  try {
+    const j = JSON.parse(data) as { error?: { message?: unknown } };
+    const msg = j?.error?.message;
+    return typeof msg === "string" && msg ? msg : null;
+  } catch {
+    return null;
+  }
+}
+
+/** OpenAI chat.completions 流式增量：choices[0].delta.content；[DONE] 与非正文事件回空串。 */
+export function openAiStreamToken(data: string): string {
+  if (data.trim() === "[DONE]") return "";
+  try {
+    const j = JSON.parse(data) as {
+      choices?: { delta?: { content?: unknown } }[];
+    };
+    const c = j?.choices?.[0]?.delta?.content;
+    return typeof c === "string" ? c : "";
+  } catch {
+    return "";
+  }
+}
+
+/** Anthropic messages 流式增量：content_block_delta 的 text_delta；其余事件回空串。 */
+export function anthropicStreamToken(data: string): string {
+  try {
+    const j = JSON.parse(data) as {
+      type?: string;
+      delta?: { type?: string; text?: unknown };
+    };
+    if (j?.type === "content_block_delta" && j?.delta?.type === "text_delta") {
+      return typeof j.delta.text === "string" ? j.delta.text : "";
+    }
+    return "";
+  } catch {
+    return "";
+  }
+}

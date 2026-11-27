@@ -369,7 +369,7 @@ am audit tail [n]
 
 ### P1 — 功能
 
-9. **OpenAI / Claude 真实接入**：当前为本地模拟；需 API Key 管理（可入保险库）、流式响应、错误重试。
+9. **OpenAI / Claude 真实接入**：✅ 优化项5 已落地（Key 管理入保险库、流式响应、失败回退标注，见「在线模型 API」节）；剩余真实 Key 联调与错误重试策略细化。
 10. **流式输出**：Ollama 与 Agent 目前非流式；改为逐 token/逐行展示与可取消。
 11. **向量/混合检索**：bge-m3 embedding + sqlite-vec / LanceDB；当前 BM25 全量载入内存，数据量大时内存与延迟上升。
 12. **PDF / Word / Excel 解析**：PDF ✅ WF4 已落地（文本层抽取入库，扫描件仅登记）；Word(.docx)/Excel ✅ 优化项4 已落地（mammoth/SheetJS 抽正文入库，见 §5.1）；剩余表格/页级溯源细化。
@@ -412,7 +412,7 @@ am audit tail [n]
 
 ## 11. 已知限制（如实）
 
-- OpenAI / Claude 模型仍为模拟回复
+- OpenAI / Claude 已接真实 API（优化项5），未配置 Key/失败时回退模拟并标注；**尚未用真实 Key 联调**
 - 保险库匹配识别为模拟候选
 - `vault_crypto.rs`、`vault_*`/`knowledge_ingest`/`chat_send` 为旧桩
 - Word/Excel 已可解析正文（优化项4）；扫描版 PDF 无文本层仅登记；抽不到正文的 Office 文件仅登记
@@ -498,6 +498,20 @@ cargo test --manifest-path src-tauri/Cargo.toml   # 含密钥写入单测
 - 自查：`npm run chatmodels:check`（目录完整性/进度聚合数学/tag 匹配/持久化往返/仓库前缀拼接，PASS；本机无 Ollama 时真实 /api/tags 探测 SKIP 不算失败）。
 - 机器适配比对（`src/machineInfo.ts` + `src/modelFit.ts`）：每张目录卡片按本机配置给出 ✓适合 / ⚠勉强 / ✗不建议 徽标与原因行（内存/磁盘/GPU/速度各一行，含本机数值与要求数值对比），区域顶部有一行「本机配置」摘要。机器信息来源：桌面端 Rust `machine_info` 命令——内存/显存/GPU 名复用 `ollama.rs` 与 `ollama_status` 相同的 `hardware()` 探测口径（CIM 内存、CIM GPU 名、nvidia-smi 显存），另加 CIM CPU 物理核数/名称与模型目录所在盘剩余空间（DriveInfo / df）；浏览器预览回退为 `hardwareConcurrency`、`deviceMemory`（Chrome 上限 8，近似值）、WebGL renderer GPU 名，显存/磁盘为 null，UI 明示「浏览器环境下为近似值」。判定口径（`assessModelFit` 纯函数）：以目录 `ramGB`/`sizeGB` 为基准——内存 ≥ ramGB 过关；≥ sizeGB×1.3（最低线）但 < ramGB 为 tight；低于最低线为 no；freeDiskGB 已知且 < sizeGB 直接 no；检测到显存 ≥ sizeGB 标「可 GPU 加速」，否则按 CPU 推理按参数量分档给 tok/s 经验预估（文案明示经验值）；内存未知时整体封顶 tight。限制如实：显存只探测 NVIDIA 独显（nvidia-smi），AMD/Intel 独显与核显共享内存场景无法给出显存数、按 CPU 估算；「其他已安装模型」不在目录内、缺 ramGB 基准，不做判定、只注明体积。自查：`npm run fit:check`（三档假机器 × 多模型判定矩阵 + 磁盘不足/未检测到兜底）。
 
+
+## 在线模型 API（优化项5，已落地代码侧，未做真实联调）
+
+- 实现：`src/apiProviders.ts`（配置/Key 存储/流式调用）+ `src/modules/ApiProvidersPanel.tsx`（设置页「在线模型 API」卡片）+ `src/streaming.ts` 的 SSE 解析（与 Ollama 的 NDJSON 解析同文件共用增量渲染机制 `App.streamAssistant`）。
+- 配置：localStorage `am_api_providers { openai?, anthropic? }`，每家 baseUrl + 模型名；默认 openai = `https://api.openai.com` + `gpt-4o-mini`，anthropic = `https://api.anthropic.com` + `claude-sonnet-4-5`，设置页可改（兼容自建/中转 baseUrl）。
+- Key 存储口径：优先保险库——已设主密码且已解锁时存为保险库条目（type=`api key`，key 名 `openai-api-key` / `anthropic-api-key`，加密落盘，读取时现场解密），设置页只显示「已存入保险库」；保险库不可用（未设置/已锁定）时回退 localStorage `am_api_keys` 明文，设置页红字明示「本机明文存储，风险自担」。Key 绝不写日志/审计。保险库里有 Key 但当前锁定时，聊天回退模拟并标注原因（解锁后可用）。
+- 调用：OpenAI `POST {baseUrl}/v1/chat/completions`（Bearer，stream:true，SSE 解析 `choices[0].delta.content`、`[DONE]` 收尾）；Anthropic `POST {baseUrl}/v1/messages`（`x-api-key` + `anthropic-version: 2023-06-01` + `anthropic-dangerous-direct-browser-access: true`，stream:true，解析 `content_block_delta` 的 `text_delta`；消息先经净化：去开头 assistant、合并连续同 role 以满足交替要求）。RAG context 注入与 ollamaChat 同一拼法（user 消息插在最后一条用户消息之前）。
+- 失败语义（诚实标注传统）：无 Key → 模拟回复 + 标注「未配置 API Key，当前为模拟回复」；保险库锁定 → 标注锁定原因；请求开始前失败 → 回退模拟 + 标注「请求失败（原因），已回退模拟」；流中途失败 → 保留已生成部分 + 尾部标注「（连接中断，已保留部分回复）」，不回退。
+- 自查：`npm run stream:check` 中 SSE 部分（OpenAI/Anthropic fixture 事件流拼接、跨 chunk 切分、error 抽取）。
+- **未做真实 API 联调**：开发环境无真实 Key，上述链路只过了类型/构建与解析器自查；待用户在设置页填入 Key 后实测（重点看 Anthropic 浏览器直连头与两家 SSE 实际事件形状）。
+
+## 聊天流式输出（优化项1，已落地）
+
+- Ollama 聊天改流式：`Chat.ollamaChatStream`（`POST /api/chat stream:true`，`src/streaming.ts` 的 `NdjsonParser` 处理跨 chunk 半行）逐 token 回调；非流式 `ollamaChat` 保留作代码回退路径。App 发送流程先插入空占位消息，增量经共用 `streamAssistant` 按 ~50ms 节流刷新；流开始前失败走原有本地回退（标注不变），流中途失败抛 `StreamPartialError` 保留部分回复并标注「（连接中断，已保留部分回复）」。RAG/仅搜索模式行为不变。自查 `npm run stream:check`（NDJSON 部分）。
 
 ## 安装包与自动更新（项4，已落地代码侧）
 
