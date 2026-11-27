@@ -14,6 +14,8 @@ import CollapsibleSection from "../components/CollapsibleSection";
 import {
   loadDownloadSource, saveDownloadSource, type DownloadSourceSettings, type HfSource,
 } from "../downloadSource";
+import { getMachineInfo, type MachineInfo } from "../machineInfo";
+import { assessEmbeddingFit } from "../modelFit";
 
 const fmtBytes = (n?: number) => {
   if (!n || n <= 0) return "—";
@@ -43,6 +45,11 @@ export default function ModelManagerPanel() {
   const [busy, setBusy] = useState(false);
   const [rebuild, setRebuild] = useState<{ done: number; total: number } | null>(null);
   const [dlSrc, setDlSrc] = useState<DownloadSourceSettings>(() => loadDownloadSource());
+  const [machine, setMachine] = useState<MachineInfo | null>(null);
+
+  useEffect(() => {
+    void getMachineInfo().then(setMachine).catch(() => {});
+  }, []);
 
   const updateDlSrc = (patch: Partial<DownloadSourceSettings>) => {
     const next = { ...dlSrc, ...patch };
@@ -208,6 +215,9 @@ export default function ModelManagerPanel() {
           const entry = registry[m.id] ?? { status: "not-downloaded" as const };
           const prog = getDownloadProgress(m.id);
           const isActive = m.id === activeId;
+          // 机器适配（项3）：机器信息完全取不到（内存/磁盘均未检测到）时不假判
+          const machineUnknown = machine !== null && machine.totalRamGB === null && machine.freeDiskGB === null;
+          const fit = machine && !machineUnknown ? assessEmbeddingFit(machine, m) : null;
           return (
             <li key={m.id} className="card">
               <div>
@@ -218,6 +228,12 @@ export default function ModelManagerPanel() {
                 {entry.status === "downloading" && <span className="badge warn">下载中</span>}
                 {entry.status === "error" && <span className="badge warn">下载失败</span>}
                 {entry.status === "not-downloaded" && <span className="badge">未下载</span>}
+                {machineUnknown && <span className="badge">未检测到机器信息</span>}
+                {fit && (fit.level === "good"
+                  ? <span className="badge ok">✓ 适合本机</span>
+                  : fit.level === "tight"
+                    ? <span className="badge warn">⚠ 勉强能跑</span>
+                    : <span className="badge bad">✗ 不建议</span>)}
               </div>
               <div className="dim">{m.blurb}</div>
               <div className="dim">
@@ -227,6 +243,11 @@ export default function ModelManagerPanel() {
                 下载体积约 {m.approxSizeMB} MB（量化版，以实际下载为准） · 要求：{m.requirements}
               </div>
               <div className="dim">速度：{m.speedNote} · 精度：{m.accuracyNote}</div>
+              {fit && (
+                <div className="dim">
+                  {fit.reasons.map((r) => <div key={r}>· {r}</div>)}
+                </div>
+              )}
 
               {entry.status === "downloading" && (
                 <div>

@@ -25,7 +25,7 @@ function check(name, ok, detail = "") {
 try {
   await build({
     stdin: {
-      contents: 'export * from "./modelFit.ts";\nexport * from "./chatModels.ts";',
+      contents: 'export * from "./modelFit.ts";\nexport * from "./chatModels.ts";\nexport * from "./models.ts";',
       resolveDir: join(root, "src"),
       loader: "ts",
       sourcefile: "fit-check-entry.ts",
@@ -36,7 +36,7 @@ try {
     outfile: bundlePath,
     logLevel: "silent",
   });
-  const { assessModelFit, CHAT_MODELS } = await import(pathToFileURL(bundlePath).href);
+  const { assessModelFit, assessEmbeddingFit, embeddingRunRamGB, CHAT_MODELS, getModelInfo } = await import(pathToFileURL(bundlePath).href);
   const model = (tag) => CHAT_MODELS.find((m) => m.tag === tag);
   const machine = (over) => ({
     totalRamGB: null, cpuCores: 8, cpuName: "check", gpuName: null,
@@ -86,6 +86,35 @@ try {
   // 通用：每个结论 reasons 非空且含数值
   check("全部样本 reasons ≥3 行且含数值",
     [a32, b7, c32, d14, e7, f3].every(hasNumbers));
+
+  // ---- 语义（embedding）模型适配（优化项3） ----
+  const embSmall = getModelInfo("Xenova/bge-small-zh-v1.5"); // 25MB → estRam ≈ 0.40GB
+  const embLarge = getModelInfo("Xenova/bge-large-zh-v1.5"); // 328MB → estRam ≈ 1.58GB
+  check("embedding 运行内存估算公式（体积×4+0.3）",
+    Math.abs(embeddingRunRamGB(embSmall) - (25 / 1024 * 4 + 0.3)) < 1e-9 &&
+    Math.abs(embeddingRunRamGB(embLarge) - (328 / 1024 * 4 + 0.3)) < 1e-9,
+    `small=${embeddingRunRamGB(embSmall).toFixed(2)}GB large=${embeddingRunRamGB(embLarge).toFixed(2)}GB`);
+  // 低配机：1.2GB 内存 → small good（0.40）、large tight（最低线 1.11 ≤ 1.2 < 1.58）
+  const LOW = machine({ totalRamGB: 1.2 });
+  const lowSmall = assessEmbeddingFit(LOW, embSmall);
+  const lowLarge = assessEmbeddingFit(LOW, embLarge);
+  check("低配 1.2GB / bge-small → good", lowSmall.level === "good", lowSmall.reasons[0]);
+  check("低配 1.2GB / bge-large → tight", lowLarge.level === "tight", lowLarge.reasons[0]);
+  // 高配机：16GB → 两者 good
+  const HIGH = machine({ totalRamGB: 16 });
+  check("高配 16GB / bge-small → good", assessEmbeddingFit(HIGH, embSmall).level === "good");
+  check("高配 16GB / bge-large → good", assessEmbeddingFit(HIGH, embLarge).level === "good");
+  // 磁盘不足：剩余 0.1GB 装不下 large（约 0.32GB）→ no 且原因为磁盘
+  const NODISK = machine({ totalRamGB: 16, freeDiskGB: 0.1 });
+  const ndLarge = assessEmbeddingFit(NODISK, embLarge);
+  check("磁盘 0.1GB / bge-large → no（磁盘）",
+    ndLarge.level === "no" && ndLarge.reasons.some((r) => r.startsWith("磁盘")), ndLarge.reasons[1]);
+  // 内存未检测到 → 封顶 tight；原因行含估算数值
+  const UNK = machine({ totalRamGB: null, freeDiskGB: null });
+  const unkFit = assessEmbeddingFit(UNK, embSmall);
+  check("未检测到 / bge-small → tight 且 reasons 含数值",
+    unkFit.level === "tight" && hasNumbers(unkFit) && unkFit.reasons.length >= 3,
+    unkFit.reasons[0]);
 } finally {
   rmSync(tmp, { recursive: true, force: true });
 }

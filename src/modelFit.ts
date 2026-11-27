@@ -12,6 +12,7 @@
 // 实际随 CPU/GPU 型号、核数与上下文长度而异，不是实测承诺。
 
 import type { ChatModelInfo } from "./chatModels";
+import type { EmbeddingModelInfo } from "./models";
 import type { MachineInfo } from "./machineInfo";
 
 export type FitLevel = "good" | "tight" | "no";
@@ -101,6 +102,66 @@ export function assessModelFit(
     reasons.push(`GPU：${gpuTxt}，按 CPU 推理估算`);
     estNote = `速度预估（经验值）：CPU 推理 ${cpuSpeedRange(b)}，实际随 CPU 型号与核数而异`;
   }
+  reasons.push(estNote);
+
+  return { level, reasons, estNote };
+}
+
+// ---- 语义（embedding）模型适配：口径与聊天侧同构，基准换成估算运行内存 ----
+//
+// embedding 模型目录没有 ramGB 字段，运行内存按经验公式估算（标经验估算）：
+//   estRamGB = 量化体积(GB) × 4 + 0.3GB 基础开销
+// （WASM/ONNX 运行时 + 权重展开 + 批量推理缓冲的粗估，不是实测）。
+// 判定：内存 ≥ estRamGB 过关；≥ estRamGB×0.7（最低线）但不足为 tight；
+// 低于最低线为 no；内存未知封顶 tight。磁盘按体积直比：freeDiskGB 已知且
+// 小于体积直接 no，未知只提示。向量维度与速度只写说明行，不参与判定。
+
+/** embedding 估算运行内存（GB，经验值）：量化体积 ×4 + 0.3GB 基础开销。 */
+export function embeddingRunRamGB(m: Pick<EmbeddingModelInfo, "approxSizeMB">): number {
+  return (m.approxSizeMB / 1024) * 4 + 0.3;
+}
+
+export function assessEmbeddingFit(
+  info: MachineInfo,
+  m: Pick<EmbeddingModelInfo, "approxSizeMB" | "dim" | "speedNote">,
+): ModelFit {
+  const reasons: string[] = [];
+  let level: FitLevel = "good";
+  const downgrade = (l: FitLevel) => {
+    if (l === "no") level = "no";
+    else if (l === "tight" && level === "good") level = "tight";
+  };
+  const sizeGB = m.approxSizeMB / 1024;
+  const estRam = embeddingRunRamGB(m);
+  const minRam = estRam * 0.7;
+  const estNote = `运行内存估算（经验值）：量化体积约 ${fmt(sizeGB)} GB ×4 + 0.3 GB 基础开销 ≈ ${fmt(estRam)} GB`;
+
+  // 内存
+  if (info.totalRamGB === null) {
+    reasons.push("内存：未检测到本机内存总量，无法确认是否达到估算运行内存，按保守口径判定");
+    downgrade("tight");
+  } else if (info.totalRamGB >= estRam) {
+    reasons.push(`内存：本机 ${fmt(info.totalRamGB)} GB ≥ 估算运行内存 ${fmt(estRam)} GB，充足`);
+  } else if (info.totalRamGB >= minRam) {
+    reasons.push(`内存：本机 ${fmt(info.totalRamGB)} GB 低于估算运行内存 ${fmt(estRam)} GB，但高于最低线 ${fmt(minRam)} GB，能跑但紧，批量回填可能较慢`);
+    downgrade("tight");
+  } else {
+    reasons.push(`内存：本机 ${fmt(info.totalRamGB)} GB 低于最低线 ${fmt(minRam)} GB（估算运行内存 ${fmt(estRam)} GB ×0.7），不建议运行`);
+    downgrade("no");
+  }
+
+  // 磁盘（按量化体积直比）
+  if (info.freeDiskGB === null) {
+    reasons.push(`磁盘：未检测到剩余空间，请自行确认至少留出约 ${fmt(sizeGB)} GB`);
+  } else if (info.freeDiskGB < sizeGB) {
+    reasons.push(`磁盘：剩余 ${fmt(info.freeDiskGB)} GB，装不下约 ${fmt(sizeGB)} GB 的模型`);
+    downgrade("no");
+  } else {
+    reasons.push(`磁盘：剩余 ${fmt(info.freeDiskGB)} GB ≥ 模型约 ${fmt(sizeGB)} GB，足够`);
+  }
+
+  // 维度/速度只作说明，不参与判定
+  reasons.push(`说明：${m.dim} 维向量；速度特点——${m.speedNote}（维度与速度不参与适配判定）`);
   reasons.push(estNote);
 
   return { level, reasons, estNote };

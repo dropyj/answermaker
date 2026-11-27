@@ -467,6 +467,7 @@ cargo test --manifest-path src-tauri/Cargo.toml   # 含密钥写入单测
 - 删除：清该模型缓存条目 + 注册表回未下载；删的是当前启用模型时 extractor 丢弃、语义状态回退 `not-downloaded`（开启时）并提示检索已降级纯 BM25。
 - 切换与重建：同一时间只启用一个模型（设置 `am_semantic_settings {enabled, modelId}`，旧格式只有 enabled 时 modelId 缺省回默认）。切换后内存索引按新模型重新过滤（doc_vectors 的 model 字段隔离），新模型向量数 < 全部切块数时模型区顶部出现提示条 + 「一键重建索引」：先 `db_clear_vectors` 清空全部向量（浏览器回退清 localStorage），再用当前模型 backfill 全量重建（带进度）。旧维度向量不会被混用——维度不同余弦无意义，索引不完整期间语义通道只用已有部分、其余走 BM25。
 - 下载源（优化项2）：设置存 `am_download_source { hf, hfCustom?, ollamaPrefix? }`（`src/downloadSource.ts`）。语义侧在 pipeline 加载前（`embeddings.ensureModel` 与 `modelManager.downloadModel` 两处）动态 import 后把 `env.remoteHost` 设为所选源：官方 `https://huggingface.co` / 镜像 `https://hf-mirror.com` / 自定义。切换只影响后续下载，已缓存模型不受影响。镜像为第三方站点（与 HF 官方无关），文件一致性由 transformers.js 加载校验兜底，本应用不对镜像可信度背书，UI 已注明。
+- 机器适配徽标（优化项3）：与聊天侧同一套机器信息（`machineInfo.ts`）与徽标样式，判定在 `modelFit.assessEmbeddingFit`：运行内存无目录基准，按经验公式估算 `estRamGB = 量化体积(GB)×4 + 0.3GB 基础开销`（明示经验估算）——内存 ≥ estRam 过关、≥ estRam×0.7 为 tight、低于为 no、未知封顶 tight；磁盘按体积直比（剩余不足直接 no）；向量维度与速度只写说明行、不参与判定。机器信息完全取不到（内存与磁盘均未检测到）时徽标显示「未检测到机器信息」，不假判。自查并入 `npm run fit:check`（低配/高配两档 × small/large + 磁盘不足 + 未检测到）。
 - 自查：`npm run models:check`（目录完整性/进度聚合数学/状态机/注册表往返/下载源映射 + bge-small 真实 pipeline 加载，PASS）。
 
 ## 聊天本地模型管理（Ollama 模型管理区，已落地）
