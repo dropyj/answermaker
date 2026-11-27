@@ -354,6 +354,7 @@ pub fn run() {
             ollama::ollama_install,
             ollama::ollama_start,
             ollama::ollama_pull,
+            ollama::machine_info,
             agent::agent_probe,
             agent::agent_run
         ])

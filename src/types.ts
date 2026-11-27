@@ -163,6 +163,17 @@ export interface OllamaStatus {
   gpu: string;
 }
 
+/** 本机硬件信息（Rust machine_info 命令，字段拿不到时为 null）。 */
+export interface RustMachineInfo {
+  total_ram_gb: number | null;
+  cpu_cores: number | null;
+  cpu_name: string | null;
+  gpu_name: string | null;
+  gpu_vram_gb: number | null;
+  free_disk_gb: number | null;
+  models_dir: string;
+}
+
 /** 本地 Agent CLI 探测结果。 */
 export interface AgentCli {
   id: string;

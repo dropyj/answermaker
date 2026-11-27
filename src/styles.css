@@ -38,6 +38,7 @@ body { margin: 0; font-family: "Segoe UI", system-ui, sans-serif; background: #f
 .collapsible-body:not([hidden]) { display: flex; flex-direction: column; gap: 6px; }
 .badge { background: var(--accent-soft); color: var(--accent); border-radius: 999px; padding: 1px 8px; font-size: 12px; margin-left: 6px; }
 .badge.warn { background: #fff3e0; color: #b26a00; }
+.badge.bad { background: #fdecea; color: #b3261e; }
 .mono { font-family: Consolas, monospace; font-size: 13px; word-break: break-all; }
 .dim { color: #8a93a8; font-size: 13px; }
 .row { display: flex; gap: 10px; align-items: center; margin: 10px 0; flex-wrap: wrap; }

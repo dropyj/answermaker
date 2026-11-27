@@ -10,6 +10,8 @@ import {
 } from "../ollamaModels";
 import { CHAT_MODEL_EVENT } from "../chatModels";
 import CollapsibleSection from "../components/CollapsibleSection";
+import { getMachineInfo, type MachineInfo } from "../machineInfo";
+import { assessModelFit } from "../modelFit";
 
 const fmtBytes = (n?: number) => {
   if (!n || n <= 0) return "—";
@@ -39,6 +41,11 @@ export default function ChatModelManager() {
   const [, setTick] = useState(0); // pull 进度变化时重渲染（数据从 ollamaModels 直读）
   const [note, setNote] = useState("");
   const [checking, setChecking] = useState(false);
+  const [machine, setMachine] = useState<MachineInfo | null>(null);
+
+  useEffect(() => {
+    void getMachineInfo().then(setMachine).catch(() => {});
+  }, []);
 
   const refresh = useCallback(async () => {
     setChecking(true);
@@ -125,6 +132,17 @@ export default function ChatModelManager() {
         </span>
         <button disabled={checking} onClick={() => void refresh()}>{checking ? "检测中…" : "重新检测"}</button>
       </div>
+      <div className="dim">
+        本机配置：{machine ? (
+          <>
+            内存 {machine.totalRamGB !== null ? `${machine.totalRamGB} GB` : "未检测到"}
+            {" "}· CPU {machine.cpuCores !== null ? `${machine.cpuCores} 核` : "未检测到"}{machine.cpuName ? `（${machine.cpuName}）` : ""}
+            {" "}· GPU {machine.gpuName ?? "未检测到"}{machine.gpuVramGB !== null ? `（显存 ${machine.gpuVramGB} GB）` : ""}
+            {" "}· 模型盘剩余 {machine.freeDiskGB !== null ? `${machine.freeDiskGB} GB` : "未检测到"}
+            {machine.source === "browser" ? "（浏览器环境下为近似值）" : ""}
+          </>
+        ) : "检测中…"}
+      </div>
       {note && <p className="notice">{note}</p>}
 
       {!available && service !== "unknown" && (
@@ -141,6 +159,7 @@ export default function ChatModelManager() {
           const ps = getPullState(m.tag);
           const inst = installed.find((x) => tagMatches(x.name, m.tag));
           const isCurrent = tagMatches(current, m.tag);
+          const fit = machine ? assessModelFit(machine, m) : null;
           return (
             <li key={m.tag} className="card">
               <div>
@@ -151,6 +170,11 @@ export default function ChatModelManager() {
                 {status === "downloading" && <span className="badge warn">下载中</span>}
                 {status === "error" && <span className="badge warn">下载失败</span>}
                 {status === "not-downloaded" && <span className="badge">未下载</span>}
+                {fit && (fit.level === "good"
+                  ? <span className="badge ok">✓ 适合本机</span>
+                  : fit.level === "tight"
+                    ? <span className="badge warn">⚠ 勉强能跑</span>
+                    : <span className="badge bad">✗ 不建议</span>)}
               </div>
               <div className="dim">{m.strengths}</div>
               <div className="dim">
@@ -159,6 +183,11 @@ export default function ChatModelManager() {
               <div className="dim">
                 下载体积 {fmtGB(m.sizeGB)}（以实际拉取为准） · 建议内存 ≥ {m.ramGB} GB
               </div>
+              {fit && (
+                <div className="dim">
+                  {fit.reasons.map((r) => <div key={r}>· {r}</div>)}
+                </div>
+              )}
 
               {status === "downloading" && ps?.progress && (
                 <div>
@@ -208,6 +237,7 @@ export default function ChatModelManager() {
                   {tagMatches(current, m.name) && <span className="badge ok">当前聊天模型</span>}
                   <span className="badge ok">已下载 · {fmtBytes(m.sizeBytes)}</span>
                 </div>
+                <div className="dim">不在目录内，缺少建议内存基准，未做机器适配判定（体积 {fmtBytes(m.sizeBytes)}，请按体积与本机内存自行估量）。</div>
                 <div className="row" style={{ marginBottom: 0 }}>
                   {!tagMatches(current, m.name) && <button onClick={() => choose(m.name)}>选用</button>}
                   <button onClick={() => void onDelete(m.name, m.name)}>删除</button>

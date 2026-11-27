@@ -263,6 +263,106 @@ pub async fn ollama_status() -> Result<OllamaStatus, String> {
     blocking(status_impl).await
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct MachineInfo {
+    pub total_ram_gb: Option<f64>,
+    pub cpu_cores: Option<u32>,
+    pub cpu_name: Option<String>,
+    pub gpu_name: Option<String>,
+    pub gpu_vram_gb: Option<f64>,
+    pub free_disk_gb: Option<f64>,
+    pub models_dir: String,
+}
+
+/// CPU 物理核数与名称：Windows 走 CIM（与 ram_gb/gpu_name 同一套手段）；
+/// 其余平台核数用 available_parallelism，名称仅 macOS 取 brand_string。
+/// 拿不到一律 None，不编造。
+fn cpu_info() -> (Option<u32>, Option<String>) {
+    #[cfg(windows)]
+    {
+        let cores = powershell("(Get-CimInstance Win32_Processor | Measure-Object -Property NumberOfCores -Sum).Sum")
+            .parse::<u32>()
+            .ok()
+            .filter(|c| *c > 0);
+        let name = powershell("(Get-CimInstance Win32_Processor | Select-Object -First 1 -ExpandProperty Name)");
+        let name = if name.is_empty() { None } else { Some(name) };
+        return (cores, name);
+    }
+    #[cfg(not(windows))]
+    {
+        let cores = std::thread::available_parallelism()
+            .ok()
+            .map(|n| n.get() as u32);
+        #[cfg(target_os = "macos")]
+        let name = Command::new("sysctl")
+            .args(["-n", "machdep.cpu.brand_string"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .ok()
+            .filter(|s| !s.is_empty());
+        #[cfg(not(target_os = "macos"))]
+        let name: Option<String> = None;
+        (cores, name)
+    }
+}
+
+/// 模型目录所在盘的剩余空间（GB）：目录可能尚不存在，向上取第一个
+/// 已存在的祖先目录测其所在盘。Windows 用 DriveInfo，类 Unix 用 df -k。
+fn free_disk_gb(dir: &str) -> Option<f64> {
+    let mut path = PathBuf::from(dir);
+    while !path.exists() {
+        if !path.pop() {
+            return None;
+        }
+    }
+    #[cfg(windows)]
+    {
+        let s = path.to_string_lossy().to_string();
+        let drive = s.chars().next()?;
+        if s.chars().nth(1) != Some(':') {
+            return None;
+        }
+        let script = format!("[System.IO.DriveInfo]::new('{drive}').AvailableFreeSpace");
+        let bytes = powershell(&script).parse::<u64>().ok()?;
+        return Some(bytes as f64 / 1024.0 / 1024.0 / 1024.0);
+    }
+    #[cfg(not(windows))]
+    {
+        let out = Command::new("df")
+            .args(["-k", &path.to_string_lossy()])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let line = text.lines().nth(1)?;
+        let avail_kb = line.split_whitespace().nth(3)?.parse::<f64>().ok()?;
+        return Some(avail_kb / 1024.0 / 1024.0);
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+fn machine_info_impl() -> Result<MachineInfo, String> {
+    // 内存/显存/GPU 名复用 hardware() 的一次性探测，与 ollama_status 同口径。
+    let (ram, vram, gpu) = hardware();
+    let dir = models_dir();
+    let (cores, cpu_name) = cpu_info();
+    let round1 = |v: f64| (v * 10.0).round() / 10.0;
+    Ok(MachineInfo {
+        total_ram_gb: if *ram > 0.0 { Some(round1(*ram)) } else { None },
+        cpu_cores: cores,
+        cpu_name,
+        gpu_name: if gpu.is_empty() { None } else { Some(gpu.clone()) },
+        gpu_vram_gb: if *vram > 0.0 { Some(round1(*vram)) } else { None },
+        free_disk_gb: free_disk_gb(&dir).map(round1),
+        models_dir: dir,
+    })
+}
+
+#[tauri::command]
+pub async fn machine_info() -> Result<MachineInfo, String> {
+    blocking(machine_info_impl).await
+}
+
 fn install_impl() -> Result<(), String> {
     if find_ollama().is_some() {
         return Ok(());
