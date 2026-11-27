@@ -32,6 +32,8 @@ import { loadAppData, saveDocs as saveDocsDb, saveFiles as saveFilesDb, saveProj
 import { initChunks } from "./search";
 import { initFeedback, chunkIdOf, explicitSignalOf, recordOpenFeedback, setExplicitFeedback } from "./feedback";
 import { initVectors } from "./embeddings";
+import { CHAT_MODEL_EVENT, getChatModel, hasStoredChatModel, setChatModel } from "./chatModels";
+import { OLLAMA_MODELS_EVENT, fetchInstalled, getInstalledModels } from "./ollamaModels";
 import { initVaultStore } from "./crypto";
 import type { Account, AgentCli, CalEvent, ChatMessage, ChatMode, FileEntry, KnowledgeDoc, ModelId, Note, OllamaStatus, Project, ProjectLink, SearchHit, SecretRequest, SystemEntry, Todo, VaultHit } from "./types";
 
@@ -232,7 +234,14 @@ export default function App() {
   const [ready, setReady] = useState(false);
   const [bootError, setBootError] = useState("");
   const [model, setModel] = useState<ModelId>("ollama");
-  const [ollamaModel, setOllamaModel] = useState("qwen2.5:3b");
+  const [ollamaModel, setOllamaModelState] = useState(() => getChatModel());
+  const [installedTags, setInstalledTags] = useState<string[]>([]);
+  const [customModel, setCustomModel] = useState(false);
+  /** 用户在聊天区改模型：更新状态 + 持久化（am_chat_model）并广播同步。 */
+  const changeOllamaModel = useCallback((name: string) => {
+    setOllamaModelState(name);
+    setChatModel(name);
+  }, []);
   const [agents, setAgents] = useState<AgentCli[]>([]);
   const [agent, setAgent] = useState("claude");
   const [mode, setMode] = useState<ChatMode>("chat");
@@ -292,10 +301,28 @@ export default function App() {
     return () => { alive = false; };
   }, []);
 
+  // 设置页改聊天模型时同步到聊天区（am:chat-model-changed）。
+  useEffect(() => {
+    const sync = () => setOllamaModelState(getChatModel());
+    window.addEventListener(CHAT_MODEL_EVENT, sync);
+    return () => window.removeEventListener(CHAT_MODEL_EVENT, sync);
+  }, []);
+
+  // 聊天区模型下拉的数据：/api/tags 已安装列表；拉取/删除后经事件同步（只读状态，不回拉防自触发）。
+  useEffect(() => {
+    void fetchInstalled(true).then((r) => setInstalledTags(r.models.map((m) => m.name))).catch(() => {});
+    const sync = () => setInstalledTags(getInstalledModels().map((m) => m.name));
+    window.addEventListener(OLLAMA_MODELS_EVENT, sync);
+    return () => window.removeEventListener(OLLAMA_MODELS_EVENT, sync);
+  }, []);
+
   useEffect(() => {
     if (!isTauri()) return;
     void call<OllamaStatus>("ollama_status")
-      .then((s) => { if (s.recommended_model) setOllamaModel(s.recommended_model); })
+      .then((s) => {
+        // 用户已保存过聊天模型选择时不覆盖；否则套用硬件推荐值（仅会话内，不落盘）。
+        if (s.recommended_model && !hasStoredChatModel()) setOllamaModelState(s.recommended_model);
+      })
       .catch(() => {});
     void call<AgentCli[]>("agent_probe")
       .then((list) => {
@@ -673,7 +700,7 @@ export default function App() {
         <div className="sidefoot">V0.2 · PRD V1.1 基线<br />Windows P0 / Mac P1</div>
       </aside>
       <main className={section === "chat" ? "main chat-main" : "main"}>
-        <OllamaBootstrap onStatus={(s) => setOllamaModel((prev) =>
+        <OllamaBootstrap onStatus={(s) => setOllamaModelState((prev) =>
           s.models.includes(prev) || s.models.includes(`${prev}:latest`) ? prev : s.recommended_model
         )} />
 
@@ -759,8 +786,37 @@ export default function App() {
                       {MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
                     </select>
                     {model === "ollama" && (
-                      <input className="chip-input" title="Ollama 模型名" value={ollamaModel}
-                        onChange={(e) => setOllamaModel(e.target.value)} placeholder="qwen2.5:3b" />
+                      <>
+                        {installedTags.length > 0 ? (
+                          <>
+                            <select
+                              className="chip-select"
+                              title="Ollama 模型（已安装列表）"
+                              value={customModel ? "__custom__" : ollamaModel}
+                              onChange={(e) => {
+                                const v = e.target.value;
+                                if (v === "__custom__") { setCustomModel(true); return; }
+                                setCustomModel(false);
+                                changeOllamaModel(v);
+                              }}
+                            >
+                              {installedTags.map((t) => <option key={t} value={t}>{t}</option>)}
+                              {!customModel && !installedTags.includes(ollamaModel) && (
+                                <option value={ollamaModel}>{ollamaModel}（未安装）</option>
+                              )}
+                              <option value="__custom__">自定义…</option>
+                            </select>
+                            {customModel && (
+                              <input className="chip-input" title="Ollama 模型名（自定义）" value={ollamaModel}
+                                onChange={(e) => changeOllamaModel(e.target.value)} placeholder="qwen2.5:3b" />
+                            )}
+                          </>
+                        ) : (
+                          <input className="chip-input" title="Ollama 模型名" value={ollamaModel}
+                            onChange={(e) => changeOllamaModel(e.target.value)} placeholder="qwen2.5:3b" />
+                        )}
+                        <button className="mode" title="到设置页管理本地聊天模型（下载/删除/选用）" onClick={() => go("settings")}>管理模型</button>
+                      </>
                     )}
                     {model === "agent" && (
                       <select className="chip-select" title="本地 Agent" value={agent} onChange={(e) => setAgent(e.target.value)}>

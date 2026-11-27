@@ -468,6 +468,30 @@ cargo test --manifest-path src-tauri/Cargo.toml   # 含密钥写入单测
 - 切换与重建：同一时间只启用一个模型（设置 `am_semantic_settings {enabled, modelId}`，旧格式只有 enabled 时 modelId 缺省回默认）。切换后内存索引按新模型重新过滤（doc_vectors 的 model 字段隔离），新模型向量数 < 全部切块数时模型区顶部出现提示条 + 「一键重建索引」：先 `db_clear_vectors` 清空全部向量（浏览器回退清 localStorage），再用当前模型 backfill 全量重建（带进度）。旧维度向量不会被混用——维度不同余弦无意义，索引不完整期间语义通道只用已有部分、其余走 BM25。
 - 自查：`npm run models:check`（目录完整性/进度聚合数学/状态机/注册表往返 + bge-small 真实 pipeline 加载，25/25 PASS）。
 
+## 聊天本地模型管理（Ollama 模型管理区，已落地）
+
+- 实现：`src/chatModels.ts`（目录 + pull 进度聚合 + tag 匹配 + 当前模型持久化，纯逻辑）、`src/ollamaModels.ts`（已安装列表/拉取/取消/删除/回退，运行时）、`src/modules/ChatModelManager.tsx`（设置页 UI，紧跟语义模型管理区之后）、`src/modules/Chat.ts` 的 `ollamaChat` 与管理层共用基础地址常量 `OLLAMA_BASE=http://localhost:11434`。目录以 Qwen 为主（体积为 Ollama 官方库常见约数、统一标「约」，以实际拉取为准；许可证不确定的条目写「以 Ollama 模型页为准」）：
+
+  | 模型 tag | 参数量 | 约体积 | 建议内存 | 说明 |
+  |---|---|---|---|---|
+  | qwen2.5:0.5b | 0.5B | 0.4GB | ≥2GB | 极轻量，简单问答/摘要 |
+  | qwen2.5:1.5b | 1.5B | 1.0GB | ≥4GB | 入门平衡点 |
+  | qwen2.5:3b（默认推荐） | 3B | 1.9GB | ≥4GB | 默认聊天模型，中文好、体积小 |
+  | qwen2.5:7b | 7B | 4.7GB | ≥8GB | 主力对话，长文 RAG 更强 |
+  | qwen2.5:14b | 14B | 9.0GB | ≥16GB | 高质量长文分析 |
+  | qwen2.5:32b | 32B | 19GB | ≥32GB | 系列最强，仅大内存/大显存 |
+  | qwen2.5-coder:7b | 7B | 4.7GB | ≥8GB | 代码生成/补全/排错 |
+  | qwen3:4b | 4B | 2.5GB | ≥6GB | Qwen3，思考模式可切换 |
+  | qwen3:8b | 8B | 5.2GB | ≥10GB | Qwen3 中坚，推理均衡 |
+  | llama3.1:8b | 8B | 4.7GB | ≥8GB | 英文/通用生态基线 |
+  | gemma3:4b | 4B | 3.3GB | ≥6GB | 轻量多模态（可识图） |
+
+- 状态来源（与语义模型不同）：「已下载/占用大小/已安装列表」一律以 Ollama 服务 `GET /api/tags` 的真实数据为准，不做本地注册表近似；服务未运行时整区提示并给出启动指引（下方「本地模型（Ollama）」卡片一键安装/启动，或手动 `ollama serve`），不假装能下载。不在目录内的已安装模型在「其他已安装模型」小列表里给大小与选用/删除。
+- tag 匹配与 `OllamaBootstrap.hasModel` 同一规则：已安装名等于 tag 或等于 `tag + ":latest"`（反向亦然），目录状态、当前模型判定、删除回退都走这条规则。
+- pull 进度与真取消：`POST /api/pull {stream:true}` 逐行解析 NDJSON，多 digest 按最新 completed/total 汇总不重复计数，percent 历史最大值兜底保证单调不减，带速度/ETA 与状态文案中文化（pulling manifest→正在获取模型清单、verifying→正在校验文件完整性等），约 200ms 节流通知 UI；流中出现 `error` 字段即置下载失败。取消用 AbortController **真中断** fetch（与语义模型的「取消意图」不同）：UI 立即回未下载；Ollama 服务端可能残留部分层，由 Ollama 自行管理、重拉时可续传复用，本应用不额外清理。
+- 当前模型持久化：localStorage `am_chat_model`（默认 `qwen2.5:3b`），`setChatModel` 广播 `am:chat-model-changed`，聊天区监听同步；聊天区工具栏改为已安装模型下拉（来自 /api/tags，含「自定义…」手输项与当前未安装值的提示项，列表拉不到时退回原文本输入）+「管理模型」入口（切到设置页本区）。启动时的硬件推荐值只在用户从未保存过选择时套用（会话内、不落盘），OllamaBootstrap 的就绪回填也不落盘。删除当前聊天模型后自动回退到任一剩余已安装模型（都没有时回默认 qwen2.5:3b）并广播，UI 给提示。`ollamaChat` 调用与失败模拟回退逻辑不变。
+- 自查：`npm run chatmodels:check`（目录完整性/进度聚合数学/tag 匹配/持久化往返，24/24 PASS；本机无 Ollama 时真实 /api/tags 探测 SKIP 不算失败）。
+
 
 ## 安装包与自动更新（项4，已落地代码侧）
 

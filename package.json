@@ -31,7 +31,8 @@
     "cli": "node cli/answermaker.mjs",
     "feedback:check": "node scripts/feedback-check.mjs",
     "embedding:check": "node scripts/embedding-check.mjs",
-    "models:check": "node scripts/models-check.mjs"
+    "models:check": "node scripts/models-check.mjs",
+    "chatmodels:check": "node scripts/chatmodels-check.mjs"
   },
   "type": "module",
   "version": "0.2.0",

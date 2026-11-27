@@ -15,6 +15,7 @@ import SyncPanel, { type SyncData } from "./SyncPanel";
 import AccountsPanel from "./AccountsPanel";
 import FeedbackPanel from "./FeedbackPanel";
 import ModelManagerPanel from "./ModelManager";
+import ChatModelManager from "./ChatModelManager";
 import type { Account, FileEntry, KnowledgeDoc } from "../types";
 import type { Dispatch, SetStateAction } from "react";
 import type { SyncPayload } from "../sync";
@@ -235,6 +236,7 @@ export default function Settings({ syncData, onSyncMerge, accountsData, feedback
       {syncData && onSyncMerge && <SyncPanel data={syncData} onMerge={onSyncMerge} />}
       <FeedbackPanel docs={feedbackDocs ?? accountsData?.docs ?? []} />
       <ModelManagerPanel />
+      <ChatModelManager />
 
       <h3>在线内容登录（POPO / KM）</h3>
       <p className="hint">

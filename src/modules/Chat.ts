@@ -1,5 +1,6 @@
 import type { ChatMessage, ChatMode, FileEntry, KnowledgeDoc, ModelId, SearchHit, SystemEntry, VaultHit } from "../types";
 import { bm25Search, searchKnowledge } from "../search";
+import { OLLAMA_BASE } from "../ollamaModels";
 
 export const MODELS: { id: ModelId; label: string }[] = [
   { id: "ollama", label: "Ollama 本地" },
@@ -110,7 +111,7 @@ role: "user",
 content: `以下为从本地知识库检索到的真实片段，请优先依据这些片段回答，并注明来源文档名：\n${context}`,
 });
 }
-const res = await fetch("http://localhost:11434/api/chat", {
+const res = await fetch(`${OLLAMA_BASE}/api/chat`, {
 method: "POST",
 headers: { "Content-Type": "application/json"},
 body: JSON.stringify({ model: modelName || "qwen2.5:3b", messages, stream: false }),
