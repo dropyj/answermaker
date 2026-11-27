@@ -82,6 +82,15 @@ export async function downloadModel(id: string): Promise<void> {
     const { pipeline, env } = await import("@xenova/transformers");
     // 下载源（项2）：与 embeddings.ensureModel 同一口径，下载前设置 remoteHost。
     env.remoteHost = hfRemoteHost(loadDownloadSource());
+    // 网页/webview 环境必须关掉本地模型探测：allowLocalModels 默认 true，会先请求
+    // /models/<id>/<file>，vite 等静态服务器对未知路径以 200+index.html 应答，被库
+    // 误当作本地文件（仅 404 才回退远程），导致 "Unexpected token '<'" 且永不走镜像。
+    env.allowLocalModels = false;
+    // ORT WASM 内核本地化：默认从 jsdelivr CDN 拉，部分网络不可达（下载会卡在推理
+    // 引擎加载）。内核文件随包放 public/ort-wasm/（取自本依赖 dist，版本天然一致），
+    // 纯本地运行、不联网。线程变体需跨域隔离（Tauri 不启用），锁定单线程。
+    env.backends.onnx.wasm.wasmPaths = "/ort-wasm/";
+    env.backends.onnx.wasm.numThreads = 1;
     await pipeline("feature-extraction", id, { quantized: true, progress_callback: onProgress });
     if (token.cancelled) return; // 取消后的迟到完成：结果丢弃
     progressMap.delete(id);

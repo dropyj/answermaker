@@ -143,6 +143,9 @@ const { pipeline, env } = await import("@xenova/transformers");
 // 下载源（项2）：加载前按设置指定 remoteHost（官方/镜像/自定义）；
 // 只影响之后的文件请求，已缓存模型不受影响。
 env.remoteHost = hfRemoteHost(loadDownloadSource());
+env.allowLocalModels = false; // 同 modelManager.downloadModel：网页环境必须跳过 /models/ 本地探测（vite 会 200+HTML）
+env.backends.onnx.wasm.wasmPaths = "/ort-wasm/"; // ORT WASM 内核本地化（public/ort-wasm/，默认 jsdelivr 部分网络不可达）
+env.backends.onnx.wasm.numThreads = 1; // 本地只带 simd/plain 内核：线程变体需跨域隔离（Tauri 不启用）
 const ex = (await pipeline("feature-extraction", modelId, { quantized: true})) as unknown as Extractor;
 extractor = ex;
 extractorModelId = modelId;

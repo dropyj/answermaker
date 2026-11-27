@@ -47,5 +47,10 @@
   "bin": {
     "answermaker": "cli/answermaker.mjs",
     "am": "cli/answermaker.mjs"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "esbuild@0.21.5": true,
+    "sharp@0.32.6": true
   }
 }
