@@ -202,7 +202,7 @@ ANSWERMAKER_MCP_DEBUG=1 npm run mcp:start   # 输出请求、工具参数与耗�
 业务数据保存在本地 SQLite（`rusqlite` bundled，WAL）：
 
 - 路径：Windows `%APPDATA%/AnswerMaker/answermaker.db`；macOS `~/Library/Application Support/AnswerMaker/answermaker.db`
-- 表：`docs`（文档 JSON）、`chunks`（切块正文）、`files`（文件归档）、`vault_meta` / `vault_items`（WebCrypto 密文 + 元数据）、`meta`
+- 表：`docs`（文档 JSON）、`chunks`（切块正文）、`files`（文件归档）、`vault_meta` / `vault_items`（WebCrypto 密文 + 元数据）、`meta`、`chat_sessions` / `chat_messages`（聊天记录，仅本机、不进 .amsync 同步包）
 - 保险库仍由前端加密后再落库，SQLite 中只有密文；会话密钥只存内存
 - 首次启动自动把旧的 localStorage 数据导入 SQLite（一次性，localStorage 原键保留作备份），之后所有读写以 SQLite 为准
 - 删除文档时同时删除其切块；重启后切块载入内存供 BM25 使用，检索结果与之前一致

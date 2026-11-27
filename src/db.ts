@@ -4,7 +4,7 @@
 // localStorage 原始键保留作为备份，之后所有读写都以 SQLite 为准。
 
 import { call, isTauri } from "./bridge";
-import type { Account, CalEvent, FileEntry, KnowledgeDoc, Note, Project, ProjectLink, RetrievalFeedback, SystemEntry, Todo } from "./types";
+import type { Account, CalEvent, ChatSessionRecord, FileEntry, KnowledgeDoc, Note, Project, ProjectLink, RetrievalFeedback, SystemEntry, Todo } from "./types";
 
 export type VaultSnapshot = { meta: unknown | null; items: unknown[] };
 
@@ -33,6 +33,7 @@ export type DbSnapshot = {
   attachments: unknown[];
   feedback: RetrievalFeedback[];
   vectors: DocVector[];
+  chats: ChatSessionRecord[];
   migrated: boolean;
 };
 
@@ -52,6 +53,7 @@ const KEYS = {
   attachments: "am_vault_attachments",
   feedback: "am_feedback",
   vectors: "am_doc_vectors",
+  chats: "am_chats",
 };
 
 function read<T>(key: string, fallback: T): T {
@@ -102,6 +104,7 @@ function localSnapshot(): DbSnapshot {
     attachments: read<unknown[]>(KEYS.attachments, []),
     feedback: read<RetrievalFeedback[]>(KEYS.feedback, []),
     vectors: read<DocVector[]>(KEYS.vectors, []),
+    chats: read<ChatSessionRecord[]>(KEYS.chats, []),
     migrated: true,
   };
 }
@@ -122,6 +125,7 @@ async function importLocal(snap: DbSnapshot) {
   await call("db_save_accounts", { items: snap.accounts });
   await call("db_save_vault_attachments", { items: snap.attachments });
   await call("db_save_feedback", { items: snap.feedback });
+  await call("db_save_chats", { items: snap.chats });
   const vectorsByDoc = new Map<string, DocVector[]>();
   for (const v of snap.vectors) {
     const list = vectorsByDoc.get(v.docId) ?? [];
@@ -155,7 +159,8 @@ export function loadAppData(): Promise<DbSnapshot> {
         local.notes.length > 0 ||
         local.todos.length > 0 ||
         local.events.length > 0 ||
-        local.accounts.length > 0;
+        local.accounts.length > 0 ||
+        local.chats.length > 0;
       if (hasLocal) {
         // 以 localStorage 备份为准重新导入（幂等），避免上次迁移中断造成半份数据。
         await importLocal(local);
@@ -248,6 +253,8 @@ export const saveNotes = makeSaver<Note>(KEYS.notes, "db_save_notes");
 export const saveTodos = makeSaver<Todo>(KEYS.todos, "db_save_todos");
 export const saveEvents = makeSaver<CalEvent>(KEYS.events, "db_save_events");
 export const saveAccounts = makeSaver<Account>(KEYS.accounts, "db_save_accounts");
+/** 聊天会话（项6）：桌面端存 SQLite chat_sessions/chat_messages，浏览器回退 localStorage。不纳入 .amsync 同步包。 */
+export const saveChats = makeSaver<ChatSessionRecord>(KEYS.chats, "db_save_chats");
 export const saveAttachments = makeSaver<unknown>(KEYS.attachments, "db_save_vault_attachments");
 /** 召回反馈（项3b）：桌面端存 SQLite retrieval_feedback 列式表，浏览器回退 localStorage。 */
 export async function saveFeedback(items: RetrievalFeedback[]) {

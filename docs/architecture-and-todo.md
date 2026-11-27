@@ -509,6 +509,14 @@ cargo test --manifest-path src-tauri/Cargo.toml   # 含密钥写入单测
 - 自查：`npm run stream:check` 中 SSE 部分（OpenAI/Anthropic fixture 事件流拼接、跨 chunk 切分、error 抽取）。
 - **未做真实 API 联调**：开发环境无真实 Key，上述链路只过了类型/构建与解析器自查；待用户在设置页填入 Key 后实测（重点看 Anthropic 浏览器直连头与两家 SSE 实际事件形状）。
 
+## 聊天记录持久化（优化项6，已落地；Rust 侧待 cargo check）
+
+- 存储：桌面端 SQLite 新表 `chat_sessions`（id/title/created_at/updated_at/model/mode）与 `chat_messages`（session_id/idx/role/kind/text/created_at + `data` 列）。核心字段列存供列表/搜索，消息完整 JSON 存 `data` 保真恢复（命中卡片等附加字段都在里面——取舍：不为每个附加字段建列）；消息本身无独立时间戳，`created_at` 记会话创建时间（近似，仅供排序/排查）。命令 `db_save_chats`（整表替换，照 `db_save_feedback` 模式）。浏览器回退 localStorage `am_chats`（db.ts KEYS 同步扩展，快照含 `chats`）。
+- 行为：会话 id 在首次发送时生成，标题取首条用户消息前 30 字（`src/chats.ts` 纯函数）；消息变化后防抖 800ms 落盘（流式增量合并保存）；启动恢复最近一次会话（按 updatedAt 倒序第一条）；仅 `send()` 产生的变更触发落盘，恢复/打开历史本身不重写 updatedAt。
+- UI：聊天区右侧轮次栏加「新建对话」（归档当前、开新会话）与「历史会话」面板：列表含标题/时间/轮数/模型，支持按标题或消息内容关键词搜索过滤（`filterChatSessions`）、点开恢复（连同模型/模式）、删除单条（二次确认）。
+- **同步包（.amsync）不纳入聊天记录**：避免同步包随对话增长膨胀、且聊天内容多为临时问答；后续如需跨设备续聊再单独评估增量同步。
+- 自查：`npm run chats:check`（标题截断/搜索过滤/序列化往返与容错/合并排序）。Rust 新命令 `db_save_chats` 与建表语句仅源码级审查，**列入待用户 Windows cargo check 清单**。
+
 ## 聊天流式输出（优化项1，已落地）
 
 - Ollama 聊天改流式：`Chat.ollamaChatStream`（`POST /api/chat stream:true`，`src/streaming.ts` 的 `NdjsonParser` 处理跨 chunk 半行）逐 token 回调；非流式 `ollamaChat` 保留作代码回退路径。App 发送流程先插入空占位消息，增量经共用 `streamAssistant` 按 ~50ms 节流刷新；流开始前失败走原有本地回退（标注不变），流中途失败抛 `StreamPartialError` 保留部分回复并标注「（连接中断，已保留部分回复）」。RAG/仅搜索模式行为不变。自查 `npm run stream:check`（NDJSON 部分）。
@@ -527,3 +535,4 @@ cargo test --manifest-path src-tauri/Cargo.toml   # 含密钥写入单测
 - 自动同步与冲突提示（项6）：SyncSettings.autoSync 默认关；开启且本会话口令验证通过时，数据签名（七类负载的长度+djb2 哈希）变化后防抖 15 秒静默推送（pushCore 与手动共用），失败只更新状态行。面板挂载时查最新版本：服务器较新且本地无变更→可拉取提示；两边都有变更→冲突条（双方版本/时间 + 拉取合并/推送按钮）。拉取合并后的签名由采纳机制写为新基线，不误报本地变更。
 - 版本回滚（项7）：`GET /package/v/:version` 返回指定版本原文（不存在 404 version_not_found）；客户端 pullVersionFromServer 复用解密路径，版本列表里非最新版可「回滚到此版本」，走 onMerge 合并语义而非覆盖，完成提示写明已回滚合并到 vX。本地实测：推两版→拉 v1 解密与原文一致，通过。
 - 注意：server-sync 的改动（项5/7）需部署到服务器才生效（同步服务走既有部署方式更新 sync-server.mjs 并重启 answermaker-sync 单元）；客户端先行发布时，新端点 404 会被面板当作加载失败提示，不影响既有手动同步。
+- 聊天记录**不纳入**同步包（优化项6 决策，避免同步包随对话增长膨胀），仅存本机 SQLite（chat_sessions/chat_messages）/localStorage，见「聊天记录持久化」节。

@@ -289,6 +289,20 @@ export interface ChatMessage {
   vaultLocked?: boolean; // 本轮匹配时保险库处于锁定状态
 }
 
+/** 聊天会话（项6）：一次完整对话的元数据；messages 为完整消息（JSON 保真落盘）。 */
+export interface ChatSession {
+  id: string;
+  title: string; // 取首条用户消息前 30 字
+  createdAt: number;
+  updatedAt: number;
+  model: string; // 该会话最近使用的模型标识（ModelId，展示用）
+  mode: string; // 该会话最近使用的 ChatMode
+}
+
+export interface ChatSessionRecord extends ChatSession {
+  messages: ChatMessage[];
+}
+
 export function load<T>(key: string, fallback: T): T {
   try { const raw = localStorage.getItem(key); return raw ? (JSON.parse(raw) as T) : fallback; } catch { return fallback; }
 }

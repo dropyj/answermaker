@@ -110,6 +110,25 @@ CREATE TABLE IF NOT EXISTS doc_vectors (
   vec TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_vectors_doc ON doc_vectors(doc_id);
+CREATE TABLE IF NOT EXISTS chat_sessions (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL DEFAULT 0,
+  model TEXT NOT NULL DEFAULT '',
+  mode TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS chat_messages (
+  session_id TEXT NOT NULL,
+  idx INTEGER NOT NULL,
+  role TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL DEFAULT '',
+  text TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL DEFAULT 0,
+  data TEXT NOT NULL,
+  PRIMARY KEY (session_id, idx)
+);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id);
 "#;
 
 pub struct DbState(pub Mutex<Connection>);
@@ -136,6 +155,7 @@ pub struct DbSnapshot {
     pub attachments: Vec<Value>,
     pub feedback: Vec<Value>,
     pub vectors: Vec<Value>,
+    pub chats: Vec<Value>,
     pub migrated: bool,
 }
 
@@ -416,6 +436,119 @@ pub fn db_clear_vectors(state: tauri::State<'_, DbState>) -> Result<(), String> 
     Ok(())
 }
 
+/// 聊天会话（项6）：会话元数据与消息核心字段（role/kind/text）列存，
+/// 完整 ChatMessage JSON 存 chat_messages.data 保真恢复（命中卡片等附加
+/// 字段都在里面）。消息本身没有独立时间戳，列存 created_at 记会话创建
+/// 时间（近似，仅供排序/排查）。聊天记录不纳入 .amsync 同步包。
+fn load_chats(conn: &Connection) -> Result<Vec<Value>, String> {
+    let mut sessions: Vec<(String, String, i64, i64, String, String)> = Vec::new();
+    {
+        let mut st = conn
+            .prepare(
+                "SELECT id, title, created_at, updated_at, model, mode \
+                 FROM chat_sessions ORDER BY updated_at DESC, rowid",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = st
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            sessions.push(row.map_err(|e| e.to_string())?);
+        }
+    }
+    let mut out = Vec::new();
+    for (id, title, created, updated, model, mode) in sessions {
+        let mut msgs = Vec::new();
+        let mut st = conn
+            .prepare("SELECT data FROM chat_messages WHERE session_id = ?1 ORDER BY idx")
+            .map_err(|e| e.to_string())?;
+        let rows = st
+            .query_map(params![id], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            msgs.push(parse(row.map_err(|e| e.to_string())?));
+        }
+        drop(st);
+        out.push(serde_json::json!({
+            "id": id,
+            "title": title,
+            "createdAt": created,
+            "updatedAt": updated,
+            "model": model,
+            "mode": mode,
+            "messages": msgs,
+        }));
+    }
+    Ok(out)
+}
+
+/// 整表替换聊天会话（与 db_save_feedback 同模式：先全删再逐条插入）。
+#[tauri::command]
+pub fn db_save_chats(
+    state: tauri::State<'_, DbState>,
+    items: Vec<Value>,
+) -> Result<(), String> {
+    let mut conn = lock(&state)?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM chat_messages", [])
+        .map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM chat_sessions", [])
+        .map_err(|e| e.to_string())?;
+    {
+        let mut sst = tx
+            .prepare(
+                "INSERT INTO chat_sessions(id, title, created_at, updated_at, model, mode) \
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+            )
+            .map_err(|e| e.to_string())?;
+        let mut mst = tx
+            .prepare(
+                "INSERT INTO chat_messages(session_id, idx, role, kind, text, created_at, data) \
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )
+            .map_err(|e| e.to_string())?;
+        for item in &items {
+            let id = item["id"]
+                .as_str()
+                .ok_or_else(|| "会话缺少 id".to_string())?;
+            let created = item["createdAt"].as_i64().unwrap_or(0);
+            sst.execute(params![
+                id,
+                item["title"].as_str().unwrap_or(""),
+                created,
+                item["updatedAt"].as_i64().unwrap_or(0),
+                item["model"].as_str().unwrap_or(""),
+                item["mode"].as_str().unwrap_or(""),
+            ])
+            .map_err(|e| e.to_string())?;
+            if let Some(msgs) = item["messages"].as_array() {
+                for (idx, m) in msgs.iter().enumerate() {
+                    mst.execute(params![
+                        id,
+                        idx as i64,
+                        m["role"].as_str().unwrap_or(""),
+                        m["kind"].as_str().unwrap_or(""),
+                        m["text"].as_str().unwrap_or(""),
+                        created,
+                        m.to_string(),
+                    ])
+                    .map_err(|e| e.to_string())?;
+                }
+            }
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn db_load_all(state: tauri::State<'_, DbState>) -> Result<DbSnapshot, String> {
     let conn = lock(&state)?;
@@ -477,6 +610,7 @@ pub fn db_load_all(state: tauri::State<'_, DbState>) -> Result<DbSnapshot, Strin
         attachments: load_table(&conn, "vault_attachments")?,
         feedback: load_feedback(&conn)?,
         vectors: load_vectors(&conn)?,
+        chats: load_chats(&conn)?,
         docs,
         files,
         chunks,

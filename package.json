@@ -39,7 +39,8 @@
     "chatmodels:check": "node scripts/chatmodels-check.mjs",
     "fit:check": "node scripts/fit-check.mjs",
     "stream:check": "node scripts/stream-check.mjs",
-    "office:check": "node scripts/office-check.mjs"
+    "office:check": "node scripts/office-check.mjs",
+    "chats:check": "node scripts/chats-check.mjs"
   },
   "type": "module",
   "version": "0.2.0",

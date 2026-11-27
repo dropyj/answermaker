@@ -30,14 +30,15 @@ import { call, isTauri } from "./bridge";
 import { uid } from "./types";
 import { installMcpSync, scheduleMcpSync } from "./mcpSync";
 import { isMcpFollowMain } from "./mcpPrefs";
-import { loadAppData, saveDocs as saveDocsDb, saveFiles as saveFilesDb, saveProjects as saveProjectsDb, saveLinks as saveLinksDb, saveSystems as saveSystemsDb, saveNotes as saveNotesDb, saveTodos as saveTodosDb, saveEvents as saveEventsDb, saveAttachments as saveAttachmentsDb, saveAccounts as saveAccountsDb } from "./db";
+import { loadAppData, saveDocs as saveDocsDb, saveFiles as saveFilesDb, saveProjects as saveProjectsDb, saveLinks as saveLinksDb, saveSystems as saveSystemsDb, saveNotes as saveNotesDb, saveTodos as saveTodosDb, saveEvents as saveEventsDb, saveAttachments as saveAttachmentsDb, saveAccounts as saveAccountsDb, saveChats as saveChatsDb } from "./db";
+import { deriveSessionTitle, filterChatSessions, sortSessions, upsertSession } from "./chats";
 import { initChunks } from "./search";
 import { initFeedback, chunkIdOf, explicitSignalOf, recordOpenFeedback, setExplicitFeedback } from "./feedback";
 import { initVectors } from "./embeddings";
 import { CHAT_MODEL_EVENT, getChatModel, hasStoredChatModel, setChatModel } from "./chatModels";
 import { OLLAMA_MODELS_EVENT, fetchInstalled, getInstalledModels } from "./ollamaModels";
 import { initVaultStore } from "./crypto";
-import type { Account, AgentCli, CalEvent, ChatMessage, ChatMode, FileEntry, KnowledgeDoc, ModelId, Note, OllamaStatus, Project, ProjectLink, SearchHit, SecretRequest, SystemEntry, Todo, VaultHit } from "./types";
+import type { Account, AgentCli, CalEvent, ChatMessage, ChatMode, ChatSessionRecord, FileEntry, KnowledgeDoc, ModelId, Note, OllamaStatus, Project, ProjectLink, SearchHit, SecretRequest, SystemEntry, Todo, VaultHit } from "./types";
 
 type Section = SectionKey;
 const NAV: { id: Section; label: string; icon: string }[] = [
@@ -53,6 +54,11 @@ const NAV: { id: Section; label: string; icon: string }[] = [
 ];
 
 const KIND_LABEL: Record<ChatMode, string> = { chat: "聊天", rag: "RAG", search: "搜索" };
+
+const WELCOME_MESSAGE: ChatMessage = {
+  role: "assistant", kind: "chat",
+  text: "欢迎使用 AnswerMaker。可直接聊天，或检索知识库与保险库。",
+};
 
 /**
  * 流式生成共用渲染（Ollama 与在线 API 同一机制）：先插入空占位消息，
@@ -290,9 +296,14 @@ export default function App() {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [streamActive, setStreamActive] = useState(false); // 流式生成中：占位消息即进度，不再另显等待气泡
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    { role: "assistant", kind: "chat", text: "欢迎使用 AnswerMaker。可直接聊天，或检索知识库与保险库。" },
-  ]);
+  const [messages, setMessages] = useState<ChatMessage[]>([WELCOME_MESSAGE]);
+  // 聊天记录持久化（项6）：会话列表 + 当前会话 id；启动恢复最近一次会话。
+  const [chatSessions, setChatSessions] = useState<ChatSessionRecord[]>([]);
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyQuery, setHistoryQuery] = useState("");
+  const chatSessionsRef = useRef<ChatSessionRecord[]>([]);
+  const chatDirtyRef = useRef(false); // 仅 send() 置真：恢复/打开会话本身不算新变更，避免启动即重写 updatedAt
   const [activeRound, setActiveRound] = useState<number | null>(null);
   const [secretReqs, setSecretReqs] = useState<SecretRequest[]>([]);
   const chatlogRef = useRef<HTMLDivElement>(null);
@@ -326,6 +337,14 @@ export default function App() {
         setTodos(snap.todos);
         setEvents(snap.events);
         setAttachments((snap.attachments ?? []) as AttachmentRecord[]);
+        // 聊天记录（项6）：恢复最近一次会话（按 updatedAt 倒序的第一条）
+        const restoredChats = sortSessions((snap.chats ?? []) as ChatSessionRecord[]);
+        setChatSessions(restoredChats);
+        chatSessionsRef.current = restoredChats;
+        if (restoredChats.length > 0 && restoredChats[0].messages.length > 0) {
+          setMessages(restoredChats[0].messages);
+          setCurrentSessionId(restoredChats[0].id);
+        }
         // WF5 迁移：旧的在线文档/文件补 accountId 到默认 POPO 账号（不存在则自动建立）
         const mig = migratePopoAttribution(snap.accounts, restored, snap.files);
         setAccounts(mig.accounts);
@@ -414,6 +433,65 @@ export default function App() {
     if (!ready || bootError) return;
     void saveAccountsDb(accounts).catch(() => {});
   }, [accounts, ready, bootError]);
+
+  // 聊天记录落盘（项6）：当前会话消息变化后防抖 800ms 整表保存（流式刷新增量合并）。
+  // 只保存 send() 产生过的变更（chatDirtyRef），启动恢复/打开历史不触发重写。
+  useEffect(() => {
+    if (!ready || bootError || !currentSessionId || !chatDirtyRef.current) return;
+    const sid = currentSessionId;
+    const timer = window.setTimeout(() => {
+      const prev = chatSessionsRef.current;
+      const existing = prev.find((s) => s.id === sid);
+      const now = Date.now();
+      const record: ChatSessionRecord = {
+        id: sid,
+        title: existing?.title ?? deriveSessionTitle(messages),
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+        model,
+        mode,
+        messages,
+      };
+      const next = upsertSession(prev, record);
+      chatSessionsRef.current = next;
+      setChatSessions(next);
+      void saveChatsDb(next).catch(() => {});
+    }, 800);
+    return () => window.clearTimeout(timer);
+  }, [messages, currentSessionId, model, mode, ready, bootError]);
+
+  /** 新建对话：当前会话已在变更时自动落盘，这里只归档视图、开新会话。 */
+  const newConversation = useCallback(() => {
+    chatDirtyRef.current = false;
+    setCurrentSessionId(null);
+    setMessages([WELCOME_MESSAGE]);
+    setActiveRound(null);
+    setHistoryOpen(false);
+  }, []);
+
+  /** 打开一条历史会话并恢复其消息与模型/模式（下一次发送起继续往该会话落盘）。 */
+  const openSession = useCallback((rec: ChatSessionRecord) => {
+    chatDirtyRef.current = false;
+    setCurrentSessionId(rec.id);
+    setMessages(rec.messages.length > 0 ? rec.messages : [WELCOME_MESSAGE]);
+    if (rec.model === "ollama" || rec.model === "openai" || rec.model === "claude" || rec.model === "agent") {
+      setModel(rec.model);
+    }
+    if (rec.mode === "chat" || rec.mode === "search") setMode(rec.mode);
+    setActiveRound(null);
+    setHistoryOpen(false);
+  }, []);
+
+  /** 删除一条历史会话（二次确认）；删的正是当前会话时顺带新建对话。 */
+  const deleteSession = useCallback((id: string) => {
+    const rec = chatSessionsRef.current.find((s) => s.id === id);
+    if (!window.confirm(`删除历史会话「${rec?.title ?? id}」？此操作不可恢复。`)) return;
+    const next = chatSessionsRef.current.filter((s) => s.id !== id);
+    chatSessionsRef.current = next;
+    setChatSessions(next);
+    void saveChatsDb(next).catch(() => {});
+    if (id === currentSessionId) newConversation();
+  }, [currentSessionId, newConversation]);
   useEffect(() => {
     try { localStorage.setItem("am_current_account", currentAccountId); } catch { /* ignore */ }
   }, [currentAccountId]);
@@ -563,6 +641,9 @@ export default function App() {
   const send = async () => {
     const q = input.trim();
     if (!q || sending) return;
+    // 聊天记录（项6）：首次发送时生成会话 id，之后本会话变更防抖落盘
+    if (!currentSessionId) setCurrentSessionId(uid());
+    chatDirtyRef.current = true;
     const userMsg: ChatMessage = { role: "user", text: q, kind: mode };
     const history = [...messages, userMsg];
     setMessages(history);
@@ -944,19 +1025,51 @@ export default function App() {
 
             <aside className="rounds">
               <div className="rounds-title">对话轮次 <span className="dim">{rounds.length}</span></div>
-              {rounds.length === 0 && <div className="dim rounds-empty">暂无对话</div>}
-              {rounds.map((r, idx) => (
-                <button
-                  key={r.messageIndex}
-                  className={activeRound === r.messageIndex ? "round-item on" : "round-item"}
-                  onClick={() => jumpToRound(r.messageIndex)}
-                  title={r.title}
-                >
-                  <span className="round-idx">#{idx + 1}</span>
-                  <span className="round-text">{r.title}</span>
-                  <span className={`badge kind-${r.kind}`}>{KIND_LABEL[r.kind]}</span>
+              <div className="row" style={{ margin: "6px 0 8px" }}>
+                <button onClick={newConversation}>新建对话</button>
+                <button onClick={() => setHistoryOpen((v) => !v)}>
+                  {historyOpen ? "收起历史" : `历史会话${chatSessions.length ? `（${chatSessions.length}）` : ""}`}
                 </button>
-              ))}
+              </div>
+              {historyOpen ? (
+                <div className="history-panel">
+                  <input
+                    placeholder="搜索历史会话（标题或内容）"
+                    value={historyQuery}
+                    onChange={(e) => setHistoryQuery(e.target.value)}
+                  />
+                  {filterChatSessions(chatSessions, historyQuery).map((s) => (
+                    <div key={s.id} className={s.id === currentSessionId ? "round-item on" : "round-item"}>
+                      <button onClick={() => openSession(s)} title={s.title}>
+                        <span className="round-text">{s.title}</span>
+                      </button>
+                      <div className="dim" style={{ fontSize: 11 }}>
+                        {new Date(s.updatedAt).toLocaleString()} · {s.messages.filter((m) => m.role === "user").length} 轮 · {MODELS.find((m) => m.id === s.model)?.label ?? s.model}
+                      </div>
+                      <button onClick={() => deleteSession(s.id)}>删除</button>
+                    </div>
+                  ))}
+                  {filterChatSessions(chatSessions, historyQuery).length === 0 && (
+                    <div className="dim rounds-empty">无匹配会话</div>
+                  )}
+                </div>
+              ) : (
+                <>
+                  {rounds.length === 0 && <div className="dim rounds-empty">暂无对话</div>}
+                  {rounds.map((r, idx) => (
+                    <button
+                      key={r.messageIndex}
+                      className={activeRound === r.messageIndex ? "round-item on" : "round-item"}
+                      onClick={() => jumpToRound(r.messageIndex)}
+                      title={r.title}
+                    >
+                      <span className="round-idx">#{idx + 1}</span>
+                      <span className="round-text">{r.title}</span>
+                      <span className={`badge kind-${r.kind}`}>{KIND_LABEL[r.kind]}</span>
+                    </button>
+                  ))}
+                </>
+              )}
             </aside>
           </div>
         )}
